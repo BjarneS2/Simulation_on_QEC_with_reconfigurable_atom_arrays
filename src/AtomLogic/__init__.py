@@ -1,10 +1,14 @@
-"""
-from src import *        
-    --> Only Lattice (because it's listed in __all__).
-from src import Lattice  
-    --> Only Lattice (standard explicit import, unaffected by __all__).
-"""
+from .pauli import Pauli, PauliWithPhase
+from .core.physical_qubit import PhysicalQubit
+from .core.lattice import Lattice
+from .core.logical_block import LogicalBlock
+from .gates import physical_gates as physical_gates
 
-from .surface_code import Lattice
-
-__all__ = ["Lattice"]
+__all__ = [
+	"Pauli",
+	"PauliWithPhase",
+	"PhysicalQubit",
+	"Lattice",
+	"LogicalBlock",
+	"physical_gates",
+]
