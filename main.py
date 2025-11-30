@@ -20,7 +20,7 @@ import json
 import time
 import stim
 
-import simple_decoder, correlated_decoder  # type: ignore
+import SurfaceCodeDecoder  # type: ignore
 # these need to be implemented maybe in a different file
 # cause this is getting crowded
 
@@ -105,25 +105,64 @@ def run_simulation(code_distance, p_meas, p_gate, p_idle, p_cnot, n_trials,
     return {"logical_error_rate": float(logical_error_rate),
             "runtime": float(sim_time),}
 
-def main(code_distance, p_gate, p_meas, p_idle, p_cnot, n_trials):
 
-    total = len(code_distance) * len(p_gate) * len(p_meas) * len(p_idle)
-    print(f"Total simulations to run: {total}")
-    pbar = tqdm(total=total, desc="Simulations completed")
+# def run_simulation(code_distance, p_meas, p_gate, p_idle, p_cnot, n_trials,
+#                    mode:Literal["correlated", "simple"]):
     
+#     t0 = time.time()
+    
+#     # 1. Generate Clean Circuit
+#     clean_circuit = noise_models.generate_clean_surface_code(
+#         distance=code_distance, 
+#         rounds=code_distance
+#     )
 
-    for d, p_gate_val, p_meas_val, p_idle_val in product(
-        code_distance, p_gate, p_meas, p_idle
+#     # 2. Apply Specific Noise Models
+#     noisy_circuit = noise_models.apply_custom_noise(
+#         clean_circuit, 
+#         p_gate=p_gate, 
+#         p_meas=p_meas, 
+#         p_idle=p_idle, 
+#         p_cnot=p_cnot
+#     )
+
+#     # 3. Sample Shots
+#     # compile_detector_sampler returns binary data: [measurements, detectors, observables]
+#     # We usually want detectors and observables. 
+#     sampler = noisy_circuit.compile_detector_sampler()
+#     shots = sampler.sample(shots=n_trials, bit_packed=False)
+
+#     # 4. Decode
+#     decoder_engine = decoders.SurfaceCodeDecoder(noisy_circuit)
+    
+#     if mode == "simple":
+#         logical_error_rate = decoder_engine.decode_simple_mwpm(shots)
+#     elif mode == "correlated":
+#         logical_error_rate = decoder_engine.decode_correlated(shots)
+#     else:
+#         raise ValueError(f"Unknown mode: {mode}")
+
+#     sim_time = time.time() - t0
+
+#     return {
+#         "logical_error_rate": float(logical_error_rate),
+#         "runtime": float(sim_time)
+#     }
+
+def main(code_distance, p_gate, p_meas, p_idle, p_cnot, n_trials, out_path):
+    total = len(code_distance) * len(p_gate) * len(p_meas) * len(p_idle)
+    print(f"Total configurations: {total}")
+    print(f"Total trials per config: {n_trials}")
+    
+    pbar = tqdm(total=total, desc="Simulations")
+    
+    for d, (gate_idx, p_gate_val), p_meas_val, p_idle_val in product(
+        code_distance, enumerate(p_gate), p_meas, p_idle
     ):
-        if cnot_same_as_gate:
-            p_cnot_val = p_gate_val
+        if len(p_cnot) > gate_idx:
+            p_cnot_val = p_cnot[gate_idx]
         else:
-            try:
-                p_cnot_val = p_cnot[np.where(p_gate == p_gate_val)[0][0]]
-            except IndexError:
-                print("p_cnot length mismatch with p_gate, using p_gate value for p_cnot")
-                print("current run: d:", d, "p_gate:", p_gate_val, "p_meas:", p_meas_val, "p_idle:", p_idle_val)
-                p_cnot_val = p_gate_val
+            p_cnot_val = p_gate_val
 
         metadata = {
             "code_distance": int(d),
@@ -132,63 +171,40 @@ def main(code_distance, p_gate, p_meas, p_idle, p_cnot, n_trials):
             "p_idle": float(p_idle_val),
             "p_cnot": float(p_cnot_val),
             "n_trials": int(n_trials),
-            "started_at": now(),
         }
 
-        results = run_simulation(
-            code_distance=d,
-            p_meas=p_meas_val,
-            p_gate=p_gate_val,
-            p_idle=p_idle_val,
-            p_cnot=p_cnot_val,
-            n_trials=n_trials,
-            mode="correlated"
-        )
-        save_results(H5_PATH, metadata, results, d)
-        pbar.update(0.5)
+        # Run Correlated
+        res_corr = run_simulation(d, p_meas_val, p_gate_val, p_idle_val, 
+                                  p_cnot_val, n_trials, "correlated")
 
-        metadata["started_at"] = now()
-        results = run_simulation(
-            code_distance=d,
-            p_meas=p_meas_val,
-            p_gate=p_gate_val,
-            p_idle=p_idle_val,
-            p_cnot=p_cnot_val,
-            n_trials=n_trials,
-            mode="simple"
-        )
-        save_results(H5_PATH, metadata, results, d)
-        pbar.update(0.5)
-
+        save_results(out_path, {**metadata, "decoder": "correlated"}, res_corr, d)
+        
+        res_simp = run_simulation(d, p_meas_val, p_gate_val, p_idle_val, p_cnot_val, n_trials, "simple")
+        save_results(out_path, {**metadata, "decoder": "simple"}, res_simp, d)
+        
+        pbar.update(1)
 
 if __name__ == "__main__":
-    code_distance = [3, 5, 7, 9, 11, 13, 15]
-    # I wanna let this run and dump/save data after each round 
-    # so I can just let it run for some time and not worry about losing data
+    distances = [3, 5]
+    
+    p_meas_range = np.logspace(-3, -2, 2)
+    p_gate_range = np.logspace(-3, -2, 2)
+    p_idle_range = [0.0]
+    p_cnot_range = np.logspace(-3, -2, 2) 
 
-    p_meas = np.logspace(-4, -1, 4)  # measurement errors
-    p_gate = np.logspace(-4, -1, 10) # single qubit gate errors
-    p_idle = np.logspace(-5, -3, 3)  # less errors when no gates are applied
-    p_cnot = np.logspace(-3, -1, 3)  # cnot tends to be worse than single q
-    # might wanna use p_cnot same as p_gate for simplicity though
-
-    cnot_same_as_gate = True
-    if cnot_same_as_gate:
-        p_cnot = p_gate
-
-    n_trials = 10000  #10k seems valid
+    n_trials = 1000
 
     OUT_DIR = Path("./simulation_data")
     OUT_DIR.mkdir(exist_ok=True, parents=True)
-    H5_PATH = OUT_DIR / "surface_code_correlated.h5"
-
+    H5_PATH = OUT_DIR / "surface_code_results.h5"
 
     main(
-        code_distance=code_distance,
-        p_gate=p_gate,
-        p_meas=p_meas,
-        p_idle=p_idle,
-        p_cnot=p_cnot,
+        code_distance=distances,
+        p_gate=p_gate_range,
+        p_meas=p_meas_range,
+        p_idle=p_idle_range,
+        p_cnot=p_cnot_range,
         n_trials=n_trials,
+        out_path=H5_PATH
     )
 
