@@ -4,7 +4,7 @@ import stim
 def create_clean_circuit(distance: int, rounds: int) -> stim.Circuit:
     """Create a clean surface code circuit."""
     return stim.Circuit.generated(
-                "surface_code:rotated_memory_x",
+                "surface_code:rotated_memory_z",
                 distance=distance,
                 rounds=rounds,
                 after_clifford_depolarization=0,
