@@ -3,6 +3,7 @@ I want to create a class that represents a surface code for qec.
 I want to use the Surface Code class to initialize a surface code of a given distance.
 """
 
+from tabnanny import check
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon, Wedge, Patch
@@ -27,12 +28,12 @@ mpl.rcParams.update(
 
 INSTRUCTION_KEYS = Literal["operation", "operation_error", "initialization_error", "measurement_error", "idle_error"]
 GATE_TYPES = Literal["H", "CNOT", "X", "Y", "Z"]
-QubitSpec = Union[List[Union[Tuple[int, int], int]], List[Union[Tuple[Tuple[int, int], Tuple[int, int]], Tuple[int, int]]], str]
+QubitSpec = Union[List[Union[Tuple[int|float, int|float], int]], List[Union[Tuple[Tuple[int|float, int|float], Tuple[int|float, int|float]], Tuple[float, float]]], str]
 InstructionDict = Dict[str, Any]
 
 class SurfaceCode:
 
-    def __init__(self, distance: int):
+    def __init__(self, distance: int, seed : int = 42):
         if distance < 0 or distance % 1 != 0 :
             raise ValueError("Distance must be an odd positive integer.")
 
@@ -43,6 +44,8 @@ class SurfaceCode:
         self.stabilisers_coords = self.x_stabilisers_coords + self.z_stabilisers_coords
         self.index_mapping = self.get_index_mapping()
         self.inverse_mapping = self.get_inverse_mapping()
+        self.seed = seed
+        np.random.seed(self.seed)
 
     def get_data_qubits(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[int, int]]|List[int]:
         """Returns the data qubits coordinates or indices based on the _as parameter."""
@@ -78,6 +81,9 @@ class SurfaceCode:
         else:
             raise ValueError("Invalid value for _as. Use 'coord' or 'idx'.")
         
+    def get_seed(self) -> int:
+        return self.seed
+    
     @staticmethod
     def create(L: int) -> Tuple[List[Tuple[int, int]], List[Tuple[float, float]], List[Tuple[float, float]]]:
         data_bits: List[Tuple[int, int]] = []
@@ -243,7 +249,7 @@ class SurfaceCode:
         for the same qubit and operation, in which case it is overwritten with the
         last given value. I also want to make sure that the probabilities are 
         between 0 and 1. if the instructions are given as 
-        {'what instruction': 'type of gate', 'qubits': list|str, probability: float}
+        [{'what instruction': 'type of gate', 'qubits': list|str, probability: float},...]
         then the instructions should be literals: 
                 - operation, operation_error, measurement_error, initialization_error
         for the type of gate it should be literals:
@@ -299,6 +305,90 @@ class SurfaceCode:
         10. Calculate the logical error rate over multiple shots.)
 
         """
+
+        if not hasattr(self, 'instructions'):
+            self.instructions: List[Dict[str, Any]] = []
+        
+        checked_instructions: List[Dict[str, Any]] = []
+        for instr in instructions:
+            valid_qubits: List[Union[Tuple[int, int], int, Tuple[Tuple[int, int], Tuple[int, int]]]] = []
+
+            if 'operation' in instr:  ### NOTE: checking operations
+                operation = instr['operation']
+                qubits = instr['qubits']
+
+                if operation == "CNOT" and isinstance(qubits[0], tuple) and isinstance(qubits[0][0], tuple):
+                    for control_coord, target_coord in qubits:
+                        if (control_coord in self.qubit_coords or control_coord in self.stabilisers_coords) and \
+                           (target_coord in self.qubit_coords or target_coord in self.stabilisers_coords):
+                            valid_qubits.append((control_coord, target_coord))
+                        
+                        else:
+                            print(f"Warning: Invalid qubit specification {(control_coord, target_coord)} for operation {operation}. Skipping this qubit.")
+                    
+                    qubits = valid_qubits
+
+                if qubits == 'all': ### NOTE: all qubits
+                    qubits = self.get_all_qubits(_as="coord")
+
+                elif qubits and isinstance(qubits[0], tuple): ### NOTE: if coordinates provided
+                    # Coordinates provided, validate them
+                    valid_qubits = []
+                    for coord in qubits:
+                        if coord in self.qubit_coords or coord in self.stabilisers_coords:
+                            valid_qubits.append(coord)
+                        else:
+                            print(f"Warning: Invalid qubit specification {coord} for operation {operation}. Skipping this qubit.")
+                    qubits = valid_qubits
+
+                elif qubits and isinstance(qubits[0], int):
+                    # Indices provided, validate them
+                    valid_qubits = []
+                    for idx in qubits:
+                        if idx in self.index_mapping:
+                            valid_qubits.append(idx)
+                        else:
+                            print(f"Warning: Invalid qubit specification {idx} for operation {operation}. Skipping this qubit.")
+                    qubits = valid_qubits
+
+                checked_instructions.append({'operation': operation, 'qubits': qubits})
+
+            elif 'operation_error' in instr:
+                operation = instr['operation_error']
+                qubits = instr['qubits']
+                probability = instr.get('probability', 0.0)
+                
+                if not (0.0 <= probability <= 1.0):
+                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
+                    probability = max(0.0, min(1.0, probability))
+                
+                checked_instructions.append({'operation_error': operation, 'qubits': qubits, 'probability': probability})
+            
+            elif 'initialization_error' in instr:
+                operation = instr['initialization_error']
+                qubits = instr['qubits']
+                probability = instr.get('probability', 0.0)
+                
+                if not (0.0 <= probability <= 1.0):
+                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
+                    probability = max(0.0, min(1.0, probability))
+                
+                checked_instructions.append({'initialization_error': operation, 'qubits': qubits, 'probability': probability})
+            
+            elif 'measurement_error' in instr:
+                operation = instr['measurement_error']
+                qubits = instr['qubits']
+                probability = instr.get('probability', 0.0)
+                
+                if not (0.0 <= probability <= 1.0):
+                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
+                    probability = max(0.0, min(1.0, probability))
+                
+                checked_instructions.append({'measurement_error': operation, 'qubits': qubits, 'probability': probability})
+            
+            else:
+                print(f"Warning: Invalid instruction format {instr}. Skipping this instruction.")
+
 
     def build_in_stim_hadamard_tracker(self, rounds: int = 1) -> stim.Circuit:
         """ 
@@ -574,3 +664,186 @@ class SurfaceCode:
         
         plt.tight_layout()
         plt.show()
+
+
+
+        
+    def is_valid_coordinate(self, coord: Tuple[int|float, int|float]) -> bool:
+        """ Check if the given coordinate is valid within the surface code. """
+        x, y = coord
+        if not (isinstance(x, int) and isinstance(y, int) or isinstance(x, float) and isinstance(y, float)):
+            return False
+        # Now I need to check if the coordinates are in the inverse mapping items
+        return (coord in self.inverse_mapping().keys())
+    
+    def is_valid_index(self, index: int) -> bool:
+        """ Check if the given index is valid within the surface code. """
+        return index in self.index_mapping.keys()
+        
+    def validate_qubit_spec(qubit_spec: Union[Tuple[int|float, int|float], int, Tuple[Tuple[int|float, int|float]]], operation: str) -> bool:
+        """ Validate if the qubit specification is valid for the given operation. 
+            qubit spec can be:
+            1. single qubit coordinate: (x, y)
+            2. single qubit index: int
+            3. CNOT qubit coordinates: ((control_x, control_y), (target_x, target_y))
+            4. CNOT qubit indices: (control_index, target_index)
+            indices are integers, while coordinates are tuples of two integers, or floats."""
+
+        if operation in ['H', 'X', 'Y', 'Z']:
+            # Check for single qubit operations
+
+            # if qubit_spec is given as coordinates (x,y) <- can be int or float
+            if isinstance(qubit_spec, tuple) and len(qubit_spec) == 2 and all(isinstance(coord, int) for coord in qubit_spec):
+                return self.is_valid_coordinate(qubit_spec)
+            
+            # if qubit_spec is given as index int
+            elif isinstance(qubit_spec, int):
+                return self.is_valid_index(qubit_spec)
+            
+            else:
+                print("Warning: Invalid qubit specification {qubits} for operation {operation}. Skipping this instruction.")
+            
+        elif operation == 'CNOT':
+            # Check for two qubit operations (CNOT)
+
+            # if qubit_spec is given as coordinates ((control_x, control_y), (target_x, target_y))
+            if (isinstance(qubit_spec, tuple) and len(qubit_spec) == 2 and
+                all(isinstance(part, tuple) and len(part) == 2 and all(isinstance(coord, int) for coord in part) for part in qubit_spec)):
+                return self.is_valid_coordinate(qubit_spec[0]) and self.is_valid_coordinate(qubit_spec[1])
+            
+            # if qubit_spec is given as indices (control_index, target_index)
+            elif (isinstance(qubit_spec, tuple) and len(qubit_spec) == 2 and
+                all(isinstance(part, int) for part in qubit_spec)):
+                return self.is_valid_index(qubit_spec[0]) and self.is_valid_index(qubit_spec[1])
+            
+            else: 
+                print("Warning: Invalid qubit specification {qubits} for operation {operation}. Skipping this instruction.")
+
+        return False
+
+    def parse_instructions_new(self, instructions: List[Dict[str, Any]]):
+            """
+            Used Like this:
+            SurfaceCode.parse_instructions([
+                {'operation': 'H', 'qubits': [(1,2), (3,4)]},
+                {'operation': 'CNOT', 'qubits': [((1,2), (3,4)), ((5,6), (7,8))]},
+                {'operation': 'X', 'qubits': [(2,3)]},
+                {'operation': 'Z', 'qubits': [(4,5)]},
+            ])
+            Firstly just saves a set of instructions to be applied to the circuit.
+            And saves it under self.intructions.
+            If it is called multiple times it appends to the existing instructions.
+
+            e.g.:
+            sc = SurfaceCode(distance=3)
+            sc.parse_instructions([...])
+            sc.parse_instructions([...])
+
+            It is also supposed to handle errors in the future - the form of:
+            sc.parse_instructions([
+                {'operation_error': 'X', 'qubits': [(2,3)], 'probability': 0.01},
+                {'operation_error': 'Z', 'qubits': [(4,5)], 'probability': 0.02},
+                {...},
+                {'idle_error': ...}, # potentially adding this
+                {initialization_error': 'X', 'qubits': [(1,1)], 'probability': 0.05},
+                {...},
+                {'measurement_error': 'Z', 'qubits': [(3,3)], 'probability': 0.03},
+                {...},
+            ])
+            
+            This should make it possible to insert errors in the circuit after
+            initialization, before measurement, and during operations. I also want
+            to be able to make it recognize if error values are given multiple times
+            for the same qubit and operation, in which case it is overwritten with the
+            last given value. I also want to make sure that the probabilities are 
+            between 0 and 1. if the instructions are given as 
+            [{'what instruction': 'type of gate', 'qubits': list|str, probability: float},...]
+            then the instructions should be literals: 
+                    - operation, operation_error, measurement_error, initialization_error
+            for the type of gate it should be literals:
+                    - H, CNOT, X, Y, Z
+            for the qubits it should be either a list of coordinates:
+                    - [(x1,y1), (x2,y2), ...]
+                or in case of CNOT a list of tuples:
+                    - [((control_x, control_y), (target_x, target_y)), ...]
+                or just the index instead of coordinates:
+                    - [index1, index2, ...]
+                respectively for CNOT:
+                    - [(control_index, target_index), ...]
+                or even a string 'all' to apply to all qubits of that type.
+
+            With the functions/methods defined above I should be able to retrieve
+            the indices of the qubits from their coordinates and vice versa.
+            To get the list of all qubits I can use get_all_qubits(_as="idx"|"coord")
+
+            should print a warning if error instruction has overridden a previous one.
+            should print a warning if probability is out of bounds [0, 1] and skip it.
+            should print a warning if qubit specification (out of surface code) is invalid and skip that instruction.
+            print("Warning: Overriding previous instruction for qubit {qubit} and operation {operation}.\n"
+                + "Before: {old_probability}, After: {new_probability}")
+            print("Warning: Probability {probability} for qubit {qubit} and operation {operation} is out of bounds [0, 1]. Clipping to valid range."))
+            print("Warning: Invalid qubit specification {qubits} for operation {operation}. Skipping this instruction.")
+
+            
+            Of course I want to enable to apply these instructions one after another
+            So if I wanna do e.g.: H as logical gate (all data qubits), then apply errors,
+            then do CNOTs between data and ancillas, then apply more errors, 
+            then measure ancillas with potential measurement errors, I should be able to do so.
+            So the instructions should be stored in a list of dictionaries, where each dictionary
+            represents a single instruction or errors at a specific point in the circuit. 
+            
+            I should maybe also think of a way to have X,Z,... errors applied every time after 
+            a certain operation, e.g. after every H, after every CNOT, ... Maybe I can do this
+            by having a special key in the dictionary like 'after_operation': 'H' and then the error
+            is applied after every H operation in the circuit. This would require parsing the circuit
+            and inserting the errors at the right places. This could be done in the build_in_stim method.
+
+            0. Always reset all bits. 
+            1. go through the instructions list and apply the operations/errors.
+            2. do rounds of stabilizer measurements.
+            3. measure all ancillas at the end.
+            4. return the circuit.
+            5. run the simulation and get the results.
+            6. visualize the results on the surface code.
+            For the full QEC cycle I would need to include as well:
+            (7. apply decoding algorithm to correct errors.
+            8. visualize the corrected results on the surface code.
+            9. Maybe enable how the error was found/corrected. Visualize
+            the actual errors that occurred vs the detected ones and what corrected them.
+            10. Calculate the logical error rate over multiple shots.)
+
+            """
+            
+
+            if not hasattr(self, 'instructions'):
+                self.instructions: List[Dict[str, Any]] = []
+            
+            checked_instructions: List[Dict[str, Any]] = []
+            for instr in instructions:
+                valid_qubits = []
+                operation = instr['operation']
+                qubits = instr['qubits']
+                assert operation in GATE_TYPES, f"Invalid operation {operation}. Must be one of {GATE_TYPES}."
+                
+                match operation, qubits:
+
+                    case _, 'all':
+                        if operation in ['H', 'X', 'Y', 'Z']:
+                            # apply to all data qubits
+                            valid_qubits = [coord for coord, qtype in self.index_mapping.values() if qtype == 'data']
+
+                        else: # CNOT case
+                            raise ValueError("Cannot apply 'all' to CNOT operation without specifying control and target qubits.")
+
+                    case 'CNOT', list() as qubit_list:
+
+                        pass
+
+                    case _, list() as qubit_list:
+                        
+                        for qubit in qubit_list:
+                            if self.validate_qubit_spec(qubit, operation):
+                                valid_qubits.append(qubit)
+                            else:
+                                print(f"Warning: Invalid qubit specification {qubit} for operation {operation}. Skipping this qubit.")
+
