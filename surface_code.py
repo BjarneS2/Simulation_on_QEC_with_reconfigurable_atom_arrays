@@ -3,11 +3,10 @@ I want to create a class that represents a surface code for qec.
 I want to use the Surface Code class to initialize a surface code of a given distance.
 """
 
-from tabnanny import check
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon, Wedge, Patch
-from typing import List, Literal, Tuple, Dict, Any, Union, Literal
+from typing import List, Literal, Tuple, Dict, Any, Union, Optional
 import matplotlib as mpl
 import seaborn as sns
 import stim
@@ -26,8 +25,8 @@ mpl.rcParams.update(
     }
 )
 
-INSTRUCTION_KEYS = Literal["operation", "operation_error", "initialization_error", "measurement_error", "idle_error"]
-GATE_TYPES = Literal["H", "CNOT", "X", "Y", "Z"]
+INSTRUCTION_KEYS = ["operation", "operation_error", "initialization_error", "measurement_error", "idle_error"]
+GATE_TYPES = ["H", "CNOT", "X", "Y", "Z"]
 QubitSpec = Union[List[Union[Tuple[int|float, int|float], int]], List[Union[Tuple[Tuple[int|float, int|float], Tuple[int|float, int|float]], Tuple[float, float]]], str]
 InstructionDict = Dict[str, Any]
 
@@ -45,6 +44,7 @@ class SurfaceCode:
         self.index_mapping = self.get_index_mapping()
         self.inverse_mapping = self.get_inverse_mapping()
         self.seed = seed
+        self.circuit = stim.Circuit()
         np.random.seed(self.seed)
 
     def get_data_qubits(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[int, int]]|List[int]:
@@ -164,10 +164,30 @@ class SurfaceCode:
         """ Given a stabilizer coordinate we can just look for qubits at position """
         """ (x +/- 0.5, y +/- 0.5) to find the data qubits it acts on given these """
         """ are in the index mapping contained (edge stabilizers got 2 neighbors) """
+        
+        """
+    # ====================================================================================================== #
+        From stim/src/... and paper: https://arxiv.org/pdf/2409.14765
+            // Define interaction orders so that hook errors run against the error grain instead of with it.
+            std::vector<surface_coord> z_order{
+                {1, 1},
+                {1, -1},
+                {-1, 1},
+                {-1, -1},
+            };
+            std::vector<surface_coord> x_order{
+                {1, 1},
+                {-1, 1},
+                {1, -1},
+                {-1, -1},
+            };
+        """
+        
         surrounding_qubits: List[Tuple[int, int]] = []
         x, y = stab_coord
-        deltas = [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)]
-
+        deltaZ = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
+        deltaX = [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)]
+        deltas = deltaZ if stab_coord in self.z_stabilisers_coords else deltaX
         for dx, dy in deltas:
             neighbor_coord: Tuple[int, int] = (int(x + dx), int(y + dy))
 
@@ -212,338 +232,132 @@ class SurfaceCode:
         plt.title(f'Surface Code d={self.d}')
         plt.grid(True)
         plt.show()
-    
-    def parse_instructions(self, instructions: List[Dict[str, Any]]) -> dict:
-        """
-        Used Like this:
-        SurfaceCode.parse_instructions([
-            {'operation': 'H', 'qubits': [(1,2), (3,4)]},
-            {'operation': 'CNOT', 'qubits': [((1,2), (3,4)), ((5,6), (7,8))]},
-            {'operation': 'X', 'qubits': [(2,3)]},
-            {'operation': 'Z', 'qubits': [(4,5)]},
-        ])
-        Firstly just saves a set of instructions to be applied to the circuit.
-        And saves it under self.intructions.
-        If it is called multiple times it appends to the existing instructions.
 
-        e.g.:
-        sc = SurfaceCode(distance=3)
-        sc.parse_instructions([...])
-        sc.parse_instructions([...])
+    def loop_body(self, stab_indices) -> stim.Circuit:
+            """ Stabilizer Measurement Loop Body """
+            loop_body = stim.Circuit()
+            # Ancillas in Z basis
+            loop_body.append("R", stab_indices)  # type: ignore
 
-        It is also supposed to handle errors in the future - the form of:
-        sc.parse_instructions([
-            {'operation_error': 'X', 'qubits': [(2,3)], 'probability': 0.01},
-            {'operation_error': 'Z', 'qubits': [(4,5)], 'probability': 0.02},
-            {...},
-            {'idle_error': ...}, # potentially adding this
-            {initialization_error': 'X', 'qubits': [(1,1)], 'probability': 0.05},
-            {...},
-            {'measurement_error': 'Z', 'qubits': [(3,3)], 'probability': 0.03},
-            {...},
-        ])
-        
-        This should make it possible to insert errors in the circuit after
-        initialization, before measurement, and during operations. I also want
-        to be able to make it recognize if error values are given multiple times
-        for the same qubit and operation, in which case it is overwritten with the
-        last given value. I also want to make sure that the probabilities are 
-        between 0 and 1. if the instructions are given as 
-        [{'what instruction': 'type of gate', 'qubits': list|str, probability: float},...]
-        then the instructions should be literals: 
-                - operation, operation_error, measurement_error, initialization_error
-        for the type of gate it should be literals:
-                - H, CNOT, X, Y, Z
-        for the qubits it should be either a list of coordinates:
-                - [(x1,y1), (x2,y2), ...]
-            or in case of CNOT a list of tuples:
-                - [((control_x, control_y), (target_x, target_y)), ...]
-            or just the index instead of coordinates:
-                - [index1, index2, ...]
-            respectively for CNOT:
-                - [(control_index, target_index), ...]
-            or even a string 'all' to apply to all qubits of that type.
-
-        With the functions/methods defined above I should be able to retrieve
-        the indices of the qubits from their coordinates and vice versa.
-        To get the list of all qubits I can use get_all_qubits(_as="idx"|"coord")
-
-        should print a warning if error instruction has overridden a previous one.
-        should print a warning if probability is out of bounds [0, 1] and skip it.
-        should print a warning if qubit specification (out of surface code) is invalid and skip that instruction.
-        print("Warning: Overriding previous instruction for qubit {qubit} and operation {operation}.\n"
-            + "Before: {old_probability}, After: {new_probability}")
-        print("Warning: Probability {probability} for qubit {qubit} and operation {operation} is out of bounds [0, 1]. Clipping to valid range."))
-        print("Warning: Invalid qubit specification {qubits} for operation {operation}. Skipping this instruction.")
-
-        
-        Of course I want to enable to apply these instructions one after another
-        So if I wanna do e.g.: H as logical gate (all data qubits), then apply errors,
-        then do CNOTs between data and ancillas, then apply more errors, 
-        then measure ancillas with potential measurement errors, I should be able to do so.
-        So the instructions should be stored in a list of dictionaries, where each dictionary
-        represents a single instruction or errors at a specific point in the circuit. 
-        
-        I should maybe also think of a way to have X,Z,... errors applied every time after 
-        a certain operation, e.g. after every H, after every CNOT, ... Maybe I can do this
-        by having a special key in the dictionary like 'after_operation': 'H' and then the error
-        is applied after every H operation in the circuit. This would require parsing the circuit
-        and inserting the errors at the right places. This could be done in the build_in_stim method.
-
-        0. Always reset all bits. 
-        1. go through the instructions list and apply the operations/errors.
-        2. do rounds of stabilizer measurements.
-        3. measure all ancillas at the end.
-        4. return the circuit.
-        5. run the simulation and get the results.
-        6. visualize the results on the surface code.
-        For the full QEC cycle I would need to include as well:
-        (7. apply decoding algorithm to correct errors.
-        8. visualize the corrected results on the surface code.
-        9. Maybe enable how the error was found/corrected. Visualize
-           the actual errors that occurred vs the detected ones and what corrected them.
-        10. Calculate the logical error rate over multiple shots.)
-
-        """
-
-        if not hasattr(self, 'instructions'):
-            self.instructions: List[Dict[str, Any]] = []
-        
-        checked_instructions: List[Dict[str, Any]] = []
-        for instr in instructions:
-            valid_qubits: List[Union[Tuple[int, int], int, Tuple[Tuple[int, int], Tuple[int, int]]]] = []
-
-            if 'operation' in instr:  ### NOTE: checking operations
-                operation = instr['operation']
-                qubits = instr['qubits']
-
-                if operation == "CNOT" and isinstance(qubits[0], tuple) and isinstance(qubits[0][0], tuple):
-                    for control_coord, target_coord in qubits:
-                        if (control_coord in self.qubit_coords or control_coord in self.stabilisers_coords) and \
-                           (target_coord in self.qubit_coords or target_coord in self.stabilisers_coords):
-                            valid_qubits.append((control_coord, target_coord))
-                        
-                        else:
-                            print(f"Warning: Invalid qubit specification {(control_coord, target_coord)} for operation {operation}. Skipping this qubit.")
-                    
-                    qubits = valid_qubits
-
-                if qubits == 'all': ### NOTE: all qubits
-                    qubits = self.get_all_qubits(_as="coord")
-
-                elif qubits and isinstance(qubits[0], tuple): ### NOTE: if coordinates provided
-                    # Coordinates provided, validate them
-                    valid_qubits = []
-                    for coord in qubits:
-                        if coord in self.qubit_coords or coord in self.stabilisers_coords:
-                            valid_qubits.append(coord)
-                        else:
-                            print(f"Warning: Invalid qubit specification {coord} for operation {operation}. Skipping this qubit.")
-                    qubits = valid_qubits
-
-                elif qubits and isinstance(qubits[0], int):
-                    # Indices provided, validate them
-                    valid_qubits = []
-                    for idx in qubits:
-                        if idx in self.index_mapping:
-                            valid_qubits.append(idx)
-                        else:
-                            print(f"Warning: Invalid qubit specification {idx} for operation {operation}. Skipping this qubit.")
-                    qubits = valid_qubits
-
-                checked_instructions.append({'operation': operation, 'qubits': qubits})
-
-            elif 'operation_error' in instr:
-                operation = instr['operation_error']
-                qubits = instr['qubits']
-                probability = instr.get('probability', 0.0)
-                
-                if not (0.0 <= probability <= 1.0):
-                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
-                    probability = max(0.0, min(1.0, probability))
-                
-                checked_instructions.append({'operation_error': operation, 'qubits': qubits, 'probability': probability})
-            
-            elif 'initialization_error' in instr:
-                operation = instr['initialization_error']
-                qubits = instr['qubits']
-                probability = instr.get('probability', 0.0)
-                
-                if not (0.0 <= probability <= 1.0):
-                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
-                    probability = max(0.0, min(1.0, probability))
-                
-                checked_instructions.append({'initialization_error': operation, 'qubits': qubits, 'probability': probability})
-            
-            elif 'measurement_error' in instr:
-                operation = instr['measurement_error']
-                qubits = instr['qubits']
-                probability = instr.get('probability', 0.0)
-                
-                if not (0.0 <= probability <= 1.0):
-                    print(f"Warning: Probability {probability} for qubit {qubits} and operation {operation} is out of bounds [0, 1]. Clipping to valid range.")
-                    probability = max(0.0, min(1.0, probability))
-                
-                checked_instructions.append({'measurement_error': operation, 'qubits': qubits, 'probability': probability})
-            
-            else:
-                print(f"Warning: Invalid instruction format {instr}. Skipping this instruction.")
-
-
-    def build_in_stim_hadamard_tracker(self, rounds: int = 1) -> stim.Circuit:
-        """ 
-            I wanna translate/build this in the stim framework. 
-            for this I need to create the stim circuit and then
-            insert all the qubits and stabilizers/ancillas.
-
-            I should first reset all qubits, and then think of 
-            how to measure the stabilizers. Meaning which operations
-            from data qubits to stabilizers I need to apply.
-            
-            For this I need to find the surrounding data qubits for 
-            each stabilizer and then apply respective CNOTs/Hadamards,
-            depending on the stabilizer type. Finally I need to measure
-            the stabilizers and repeat this for a number of rounds.
-
-            For measuring Z Errors: 
-                - Apply Hadamard on the stabilizer
-                - Apply CNOT from data qubits to stabilizer
-                - Apply Hadamard on the stabilizer
-                - Measure the stabilizer
-            For measuring X Errors:
-                - Apply CNOT from data qubits to stabilizer
-                - Measure the stabilizer
-
-            In addition to this I need to build a parser that can 
-            take a list of operations,qubits and convert them into
-            stim operations. but this should only run on the circuit
-            before the measurement rounds. So this is where I will
-            insert Hadamards and CNOTs as operations and Errors in the 
-            future. I will need to also consider the amount of logical
-            Hadamards I apply to the code since I need to track them 
-            to switch the stabilizer types accordingly.   
-
-        """
-        circuit = stim.Circuit()
-
-        for idx, (coord, _) in self.index_mapping.items():
-            circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
-
-        data_indices = [k for k, v in self.index_mapping.items() if v[1] == 'data']
-        x_stab_indices = [k for k, v in self.index_mapping.items() if v[1] == 'X_stab']
-        z_stab_indices = [k for k, v in self.index_mapping.items() if v[1] == 'Z_stab']
-        all_ancillas = x_stab_indices + z_stab_indices
-
-        circuit.append("R", self.index_mapping.keys())  # type: ignore
-        circuit.append("TICK")  # type: ignore
-        """
-        insert error in one qubit for testing
-        """
-        circuit.append("X", data_indices[:])  # type: ignore
-        circuit.append("Z", data_indices[:])  # type: ignore
-
-        loop_body = stim.Circuit()
-
-        loop_body.append("R", all_ancillas)  # type: ignore
-        
-        for ancilla_idx in all_ancillas:
-            coord, qtype = self.index_mapping[ancilla_idx]
-            neighbors = self.get_surrounding_data_qubits(coord) # type: ignore
-            
-            for neighbor_coord in neighbors:
-                neighbor_idx = self.inverse_mapping[neighbor_coord]
-                
-                if qtype == 'X_stab':
-                    loop_body.append("H", [neighbor_idx])  # type: ignore
-                    loop_body.append("CNOT", [ancilla_idx, neighbor_idx])  # type: ignore
-                    loop_body.append("H", [neighbor_idx])  # type: ignore
-
-                elif qtype == 'Z_stab':
-                    loop_body.append("CNOT", [neighbor_idx, ancilla_idx])  # type: ignore
-
-        loop_body.append("M", all_ancillas)  # type: ignore
-        loop_body.append("TICK")  # type: ignore
-
-        circuit += loop_body * rounds
-
-        return circuit
-
-    def build_in_stim(self, rounds: int = 1) -> stim.Circuit:
-        circuit = stim.Circuit()
-
-        for idx, (coord, _) in self.index_mapping.items():
-            circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
-
-        data_indices = [k for k, v in self.index_mapping.items() if v[1] == 'data']
-        x_stab_indices = [k for k, v in self.index_mapping.items() if v[1] == 'X_stab']
-        z_stab_indices = [k for k, v in self.index_mapping.items() if v[1] == 'Z_stab']
-        all_ancillas = x_stab_indices + z_stab_indices
-
-        circuit.append("R", self.index_mapping.keys())  # type: ignore
-        circuit.append("TICK")  # type: ignore
-        """
-        insert error in one qubit for testing
-        """
-        circuit.append("X", data_indices[:])  # type: ignore
-        circuit.append("Z", data_indices[:])  # type: ignore
-
-        loop_body = stim.Circuit()
-
-        loop_body.append("R", all_ancillas)  # type: ignore
-        
-        # X-Stabilizers (Measure X parity -> Detect Z Errors)
-        # Requirement: Apply H on stabilizer
-        # if x_stab_indices:
-        #     loop_body.append("H", x_stab_indices)  # type: ignore
-        
-        # Apply CNOTs
-        # We iterate over every ancilla, find its neighbors, and apply the CNOT.
-        # Note: In a real QEC, the order of CNOTs (N, E, W, S) matters for hook errors.
-        # Here we perform them in the order found in 'get_surrounding_data_qubits'.
-        
-        for ancilla_idx in all_ancillas:
-            coord, qtype = self.index_mapping[ancilla_idx]
-            neighbors = self.get_surrounding_data_qubits(coord) # type: ignore
-            
-            for neighbor_coord in neighbors:
-                neighbor_idx = self.inverse_mapping[neighbor_coord]
+            for ancilla_idx in stab_indices:
+                coord, qtype = self.index_mapping[ancilla_idx]
+                neighbors = self.get_surrounding_data_qubits(coord) # type: ignore
                 
                 if qtype == 'X_stab':
                     # Measuring X: H(Anc) -> CNOT(Anc, Data) -> H(Anc)
-                    # This propagates X from Ancilla to Data (checking X parity)
-                    loop_body.append("H", [neighbor_idx])  # type: ignore
-                    loop_body.append("CNOT", [ancilla_idx, neighbor_idx])  # type: ignore
-                    loop_body.append("H", [neighbor_idx])  # type: ignore
+                    loop_body.append("H", [ancilla_idx])  # type: ignore
 
-                elif qtype == 'Z_stab':
-                    # Measuring Z: CNOT(Data, Anc)
-                    # This propagates Z from Data to Ancilla (checking Z parity)
-                    loop_body.append("CNOT", [neighbor_idx, ancilla_idx])  # type: ignore
+                for neighbor_coord in neighbors:
+                    neighbor_idx = self.inverse_mapping[neighbor_coord]
+                    
+                    if qtype == 'X_stab':
+                        # Measuring X: H(Anc) -> CNOT(Anc, Data) -> H(Anc)
+                        loop_body.append("CNOT", [ancilla_idx, neighbor_idx])  # type: ignore
 
-        # X-Stabilizers: Apply closing H on stabilizer
-        # if x_stab_indices:
-        #     loop_body.append("H", x_stab_indices)  # type: ignore
+                    elif qtype == 'Z_stab':
+                        # Measuring Z: CNOT(Data, Anc)
+                        loop_body.append("CNOT", [neighbor_idx, ancilla_idx])  # type: ignore
 
-        # --- C. Measure Ancillas ---
-        loop_body.append("M", all_ancillas)  # type: ignore
-        loop_body.append("TICK")  # type: ignore
+                if qtype == 'X_stab':
+                    loop_body.append("H", [ancilla_idx])  # type: ignore
+                    
+            loop_body.append("M", stab_indices)  # type: ignore
+            loop_body.append("TICK")  # type: ignore
+            return loop_body
 
-        # Add loop to main circuit
-        circuit += loop_body * rounds
 
-        return circuit
+    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z"):
+
+        for idx, (coord, _) in self.index_mapping.items():
+            self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
+
+        data_indices = [k for k, v in self.index_mapping.items() if v[1] == 'data']
+        stab_indices: List[int] = self.get_stabilisers(_as="idx") # type: ignore
         
-    def run_simulation(self, circuit: stim.Circuit, shots: int = 1000) -> np.ndarray:
-        sampler = circuit.compile_sampler()
+        dt = len(stab_indices)
+        if dt == 0:
+            raise RuntimeError("No stabilizers found in the surface code.")
+
+        # |0>L or |+>L
+        if logical_basis == "Z":
+            self.circuit.append("R", data_indices) # type: ignore
+        elif logical_basis == "X":
+            self.circuit.append("R", data_indices) # type: ignore
+            self.circuit.append("H", data_indices) # type: ignore
+        else:
+            raise ValueError("logical_basis must be 'Z' or 'X'")
+
+        self.circuit.append("TICK") # type: ignore 
+        
+        loop_body = self.loop_body(stab_indices=stab_indices)
+        # One-shot stabilizer projection
+        self.circuit += loop_body
+
+
+
+        t = dt # "time index"
+
+        for j, anc in enumerate(stab_indices):
+            # first detection round (t=0) acts as the initialization round
+            coord, _ = self.index_mapping[anc]
+            # target the time j produced by the first M operation.
+
+            lookback = j - t
+
+            self.circuit.append(
+                "DETECTOR",
+                stim.target_rec(lookback), # [(t + j) | stim.target_record_bit],
+                [coord[0], coord[1], 0],
+            )
+        
+        t +=  dt # increment the time index
+        self.circuit.append("TICK") # type: ignore
+        
+        for rnd in range(1, rounds):
+            # Shift coordinates 
+            self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])  # type: ignore
+            self.circuit += loop_body
+
+            prev = t - dt
+            curr = t
+            for j, anc in enumerate(stab_indices):
+                coord, _ = self.index_mapping[anc]
+                # target the time j produced by the last M operation.
+
+                lookback_prev = (prev+j) - (t+dt) # look back to prev
+                lookback_curr = (curr+j) - (t+dt) # look back to curr
+
+                self.circuit.append(
+                    "DETECTOR",
+                    [
+                        stim.target_rec(lookback_prev), # (prev + j) | stim.target_record_bit, 
+                        stim.target_rec(lookback_curr), # (curr + j) | stim.target_record_bit
+                    ],
+                    [coord[0], coord[1], rnd]
+                )
+
+            t +=  dt
+
+        if logical_basis == "Z":
+            self.circuit.append("M", data_indices) # type: ignore
+        else:
+            # measure X by rotating to Z then measuring
+            self.circuit.append("H", data_indices) # type: ignore
+            self.circuit.append("M", data_indices) # type: ignore
+
+
+    def diagram(self, *args, **kwargs) -> None:
+        """Prints a text diagram of the circuit."""
+        print(self.circuit.diagram(*args, **kwargs))
+
+    def run_simulation(self, circuit: Optional[stim.Circuit] = None, shots: int = 1000) -> np.ndarray:
+        if circuit is not None:
+            sampler = circuit.compile_sampler()
+        else:
+            sampler = self.circuit.compile_sampler()
         results = sampler.sample(shots=shots)
         return results
-    
-    def visualize_results_sketch(self, result: np.ndarray):
-        """ Visualize the measurement results one the surface code """
-        """ Therefore I would liket to plot all of the data qubits """
-        """ but this time color the plaquetes instead of individual"""
-        """ ancillas according to the measurement results. """  
-    
+ 
     def visualize_results(self, result: np.ndarray):
         """ 
         Visualize the measurement results on the surface code.
@@ -553,8 +367,8 @@ class SurfaceCode:
         
         # 1. Define Color Palette
         colors = {
-            'X_stab': {0: '#A3C1DA', 1: '#D15567'},  # Muted Blue vs Muted Red
-            'Z_stab': {0: '#6C8EBF', 1: '#E17C88'}   # Darker Blue vs Lighter Red
+            'X_stab': {0: "#79ABD4", 1: "#F07084"},  # Muted Blue vs Muted Red
+            'Z_stab': {0: "#385B8B", 1: "#9D212F"}   # Darker Blue vs Lighter Red
         }
 
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -664,9 +478,6 @@ class SurfaceCode:
         
         plt.tight_layout()
         plt.show()
-
-
-
         
     def is_valid_coordinate(self, coord: Tuple[int|float, int|float]) -> bool:
         """ Check if the given coordinate is valid within the surface code. """
@@ -674,13 +485,13 @@ class SurfaceCode:
         if not (isinstance(x, int) and isinstance(y, int) or isinstance(x, float) and isinstance(y, float)):
             return False
         # Now I need to check if the coordinates are in the inverse mapping items
-        return (coord in self.inverse_mapping().keys())
+        return (coord in self.inverse_mapping.keys())
     
     def is_valid_index(self, index: int) -> bool:
         """ Check if the given index is valid within the surface code. """
         return index in self.index_mapping.keys()
         
-    def validate_qubit_spec(qubit_spec: Union[Tuple[int|float, int|float], int, Tuple[Tuple[int|float, int|float]]], operation: str) -> bool:
+    def validate_qubit_spec(self, qubit_spec: Union[Tuple[int, int], int, Tuple[Tuple[int|float, int|float]]], operation: str) -> bool:
         """ Validate if the qubit specification is valid for the given operation. 
             qubit spec can be:
             1. single qubit coordinate: (x, y)
@@ -709,7 +520,7 @@ class SurfaceCode:
             # if qubit_spec is given as coordinates ((control_x, control_y), (target_x, target_y))
             if (isinstance(qubit_spec, tuple) and len(qubit_spec) == 2 and
                 all(isinstance(part, tuple) and len(part) == 2 and all(isinstance(coord, int) for coord in part) for part in qubit_spec)):
-                return self.is_valid_coordinate(qubit_spec[0]) and self.is_valid_coordinate(qubit_spec[1])
+                return self.is_valid_coordinate(qubit_spec[0]) and self.is_valid_coordinate(qubit_spec[1])  # type: ignore
             
             # if qubit_spec is given as indices (control_index, target_index)
             elif (isinstance(qubit_spec, tuple) and len(qubit_spec) == 2 and
@@ -813,7 +624,6 @@ class SurfaceCode:
             10. Calculate the logical error rate over multiple shots.)
 
             """
-            
 
             if not hasattr(self, 'instructions'):
                 self.instructions: List[Dict[str, Any]] = []
@@ -826,7 +636,7 @@ class SurfaceCode:
                 assert operation in GATE_TYPES, f"Invalid operation {operation}. Must be one of {GATE_TYPES}."
                 
                 match operation, qubits:
-
+                    # any gate checked for all qubits
                     case _, 'all':
                         if operation in ['H', 'X', 'Y', 'Z']:
                             # apply to all data qubits
@@ -834,16 +644,39 @@ class SurfaceCode:
 
                         else: # CNOT case
                             raise ValueError("Cannot apply 'all' to CNOT operation without specifying control and target qubits.")
-
+                    
+                    # CNOT gate with list of qubits
                     case 'CNOT', list() as qubit_list:
-
-                        pass
-
+                        # Case that it is a CNOT operation with a list of qubit specifications
+                        for control_target in qubit_list:
+                            if self.validate_qubit_spec(control_target, operation):
+                                valid_qubits.append(control_target)
+                            else:
+                                print(f"Warning: Invalid qubit specification {control_target} for operation {operation}. Skipping this qubit.")
+                    
+                    # Single qubit gate with list of qubits
                     case _, list() as qubit_list:
-                        
+                        # Case that it is a single qubit operation with a list of qubit specifications
                         for qubit in qubit_list:
                             if self.validate_qubit_spec(qubit, operation):
                                 valid_qubits.append(qubit)
                             else:
                                 print(f"Warning: Invalid qubit specification {qubit} for operation {operation}. Skipping this qubit.")
+                    
+                    # Invalid instruction
+                    case _:
+                        print(f"Warning: Invalid instruction for qubit specification {qubits} and operation {operation}. Skipping this instruction.")
+                
+                # still missing the error cases but for now just store the valid instructions
+                if valid_qubits:
+                    checked_instructions.append({'operation': operation, 'qubits': valid_qubits})
 
+            self.instructions.extend(checked_instructions)
+
+    def get_instructions(self) -> List[Dict[str, Any]]:
+        """ Returns the list of parsed instructions. """
+        if hasattr(self, 'instructions'):
+            return deepcopy(self.instructions)
+        else:
+            return []
+        
