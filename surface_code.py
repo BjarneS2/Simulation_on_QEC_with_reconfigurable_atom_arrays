@@ -13,17 +13,6 @@ import stim
 from copy import deepcopy 
 
 
-sns.set_style("darkgrid")
-mpl.rcParams.update(  
-    {
-        "font.size": 12,
-        "grid.color": "0.5",
-        "grid.linestyle": "--",
-        "grid.linewidth": 0.6,
-        "xtick.color": "black",
-        "ytick.color": "black",
-    }
-)
 
 INSTRUCTION_KEYS = ["operation", "operation_error", "initialization_error", "measurement_error", "idle_error"]
 GATE_TYPES = ["H", "CNOT", "X", "Y", "Z"]
@@ -45,6 +34,16 @@ class SurfaceCode:
         self.inverse_mapping = self.get_inverse_mapping()
         self.seed = seed
         self.circuit = stim.Circuit()
+        
+        stab_indices: List[int] = self.get_stabilisers(_as="idx") # type: ignore
+        self.stab_indices = sorted(  # otherwise Z and X stabilizers are measured in random order!
+            stab_indices,
+            key=lambda anc: (
+                self.index_mapping[anc][1],        # 'X_stab' or 'Z_stab'
+                self.index_mapping[anc][0][0],     # x-coordinate
+                self.index_mapping[anc][0][1],     # y-coordinate
+            )
+        )
         np.random.seed(self.seed)
 
     def get_data_qubits(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[int, int]]|List[int]:
@@ -185,11 +184,11 @@ class SurfaceCode:
         
         surrounding_qubits: List[Tuple[int, int]] = []
         x, y = stab_coord
-        deltaZ = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
-        deltaX = [(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)]
+        deltaZ = [(0.5, 0.5), (0.5, -0.5), (-0.5, 0.5), (-0.5, -0.5)]
+        deltaX = [(0.5, 0.5), (-0.5, 0.5), (0.5, -0.5), (-0.5, -0.5)]
         deltas = deltaZ if stab_coord in self.z_stabilisers_coords else deltaX
         for dx, dy in deltas:
-            neighbor_coord: Tuple[int, int] = (int(x + dx), int(y + dy))
+            neighbor_coord: Tuple[int, int] = ((x + dx), (y + dy)) # type: ignore
 
             if neighbor_coord in self.qubit_coords:
                 surrounding_qubits.append(neighbor_coord)
@@ -197,6 +196,17 @@ class SurfaceCode:
         return surrounding_qubits
 
     def plot(self):
+        sns.set_style("dark")
+        mpl.rcParams.update(  
+            {
+                "font.size": 12,
+                "grid.color": "0.5",
+                "grid.linestyle": "--",
+                "grid.linewidth": 0.6,
+                "xtick.color": "black",
+                "ytick.color": "black",
+            }
+        )
 
         # Surface code plotting, to see if the structure is correct
         plt.figure(figsize=(self.d, self.d))
@@ -204,9 +214,6 @@ class SurfaceCode:
         data_x = [coord[0] for coord in self.qubit_coords]
         data_y = [coord[1] for coord in self.qubit_coords]
         plt.scatter(data_x, data_y, color='blue', label='Data Qubits', s=65)
-
-        anc_x = [coord[0] for coord in self.stabilisers_coords]
-        anc_y = [coord[1] for coord in self.stabilisers_coords]
         
         x_stab_x = [coord[0] for coord in self.x_stabilisers_coords]
         x_stab_y = [coord[1] for coord in self.x_stabilisers_coords]
@@ -218,7 +225,8 @@ class SurfaceCode:
         plt.scatter(z_stab_x, z_stab_y, color='green', marker='s', label='Z Stabilizers', s=65)
 
         """ Create a number indexing for each qubit and add the number 
-            on the markers of the plot in the respective positions """
+            on the markers of the plot in the respective positions 
+        """
         for index, (coord, qtype) in self.index_mapping.items():
             plt.text(coord[0], coord[1], str(index), color='white', 
                      fontsize=8, ha='center', va='center')
@@ -233,13 +241,13 @@ class SurfaceCode:
         plt.grid(True)
         plt.show()
 
-    def loop_body(self, stab_indices) -> stim.Circuit:
+    def loop_body(self) -> stim.Circuit:
             """ Stabilizer Measurement Loop Body """
             loop_body = stim.Circuit()
             # Ancillas in Z basis
-            loop_body.append("R", stab_indices)  # type: ignore
+            loop_body.append("R", self.stab_indices)  # type: ignore
 
-            for ancilla_idx in stab_indices:
+            for ancilla_idx in self.stab_indices:
                 coord, qtype = self.index_mapping[ancilla_idx]
                 neighbors = self.get_surrounding_data_qubits(coord) # type: ignore
                 
@@ -261,10 +269,9 @@ class SurfaceCode:
                 if qtype == 'X_stab':
                     loop_body.append("H", [ancilla_idx])  # type: ignore
                     
-            loop_body.append("M", stab_indices)  # type: ignore
+            loop_body.append("M", self.stab_indices)  # type: ignore
             loop_body.append("TICK")  # type: ignore
             return loop_body
-
 
     def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z"):
 
@@ -272,9 +279,8 @@ class SurfaceCode:
             self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
 
         data_indices = [k for k, v in self.index_mapping.items() if v[1] == 'data']
-        stab_indices: List[int] = self.get_stabilisers(_as="idx") # type: ignore
-        
-        dt = len(stab_indices)
+
+        dt = len(self.stab_indices)
         if dt == 0:
             raise RuntimeError("No stabilizers found in the surface code.")
 
@@ -289,27 +295,31 @@ class SurfaceCode:
 
         self.circuit.append("TICK") # type: ignore 
         
-        loop_body = self.loop_body(stab_indices=stab_indices)
+        loop_body = self.loop_body()
         # One-shot stabilizer projection
         self.circuit += loop_body
 
-
-
         t = dt # "time index"
 
-        for j, anc in enumerate(stab_indices):
+        for j, anc in enumerate(self.stab_indices):
             # first detection round (t=0) acts as the initialization round
             coord, _ = self.index_mapping[anc]
             # target the time j produced by the first M operation.
 
             lookback = j - t
-
             self.circuit.append(
                 "DETECTOR",
                 stim.target_rec(lookback), # [(t + j) | stim.target_record_bit],
                 [coord[0], coord[1], 0],
             )
+
+        """
+        Add circuit instructions here for multiple rounds
+        """
         
+        # Just add one X error for now:
+        self.circuit.append("X", 24) # type: ignore
+
         t +=  dt # increment the time index
         self.circuit.append("TICK") # type: ignore
         
@@ -320,7 +330,7 @@ class SurfaceCode:
 
             prev = t - dt
             curr = t
-            for j, anc in enumerate(stab_indices):
+            for j, anc in enumerate(self.stab_indices):
                 coord, _ = self.index_mapping[anc]
                 # target the time j produced by the last M operation.
 
@@ -345,7 +355,6 @@ class SurfaceCode:
             self.circuit.append("H", data_indices) # type: ignore
             self.circuit.append("M", data_indices) # type: ignore
 
-
     def diagram(self, *args, **kwargs) -> None:
         """Prints a text diagram of the circuit."""
         print(self.circuit.diagram(*args, **kwargs))
@@ -358,14 +367,27 @@ class SurfaceCode:
         results = sampler.sample(shots=shots)
         return results
  
-    def visualize_results(self, result: np.ndarray):
+    def visualize_results(self, result: np.ndarray, show_ancillas: bool = False) -> None:
         """ 
         Visualize the measurement results on the surface code.
         Plots data qubits as circles and colors the plaquettes (stabilizers)
         based on the measurement outcome (Syndrome vs Normal).
+        results: Array of measurement (list of bools or 0/1) for all stabilizers.
+        show_ancillas: If True, shows ancilla qubits as squares on the plot.
         """
         
-        # 1. Define Color Palette
+        sns.set_style("darkgrid")
+        mpl.rcParams.update(  
+            {
+                "font.size": 12,
+                "grid.color": "0.5",
+                "grid.linestyle": "--",
+                "grid.linewidth": 0.6,
+                "xtick.color": "black",
+                "ytick.color": "black",
+            }
+        )
+        
         colors = {
             'X_stab': {0: "#79ABD4", 1: "#F07084"},  # Muted Blue vs Muted Red
             'Z_stab': {0: "#385B8B", 1: "#9D212F"}   # Darker Blue vs Lighter Red
@@ -373,17 +395,16 @@ class SurfaceCode:
 
         fig, ax = plt.subplots(figsize=(8, 8))
         
-        # 2. Map results back to specific stabilizers
-        x_indices = [k for k, v in self.index_mapping.items() if v[1] == 'X_stab']
-        z_indices = [k for k, v in self.index_mapping.items() if v[1] == 'Z_stab']
-        
-        if len(result) != (len(x_indices) + len(z_indices)):
-            raise ValueError(f"Result length {len(result)} does not match number of stabilizers.")
-
+        # Split into X and Z based on the correct ordering
+        x_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
+        z_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
+        # Now match the result array exactly
         x_results = result[:len(x_indices)]
         z_results = result[len(x_indices):]
 
-        # Helper to plot a single stabilizer
+        if len(result) != (len(x_indices) + len(z_indices)):
+            raise ValueError(f"Result length {len(result)} does not match number of stabilizers.")
+
         def plot_stabilizer_patch(coord, neighbors, qtype, val):
             color = colors[qtype][val]
             cx, cy = coord
@@ -397,12 +418,10 @@ class SurfaceCode:
                 ax.add_patch(poly)
             
             elif len(neighbors) == 2:
-                # Boundary Stabilizer -> Wedge (Half-circle)
-                
-                # --- START OF FIX: SHIFTING CENTER ---
+                # Boundary Stabilizer -> wedge (half circle)
                 shift_x = 0
                 shift_y = 0
-                L = self.d # Distance/Size of the code grid
+                L = self.d 
                 
                 # Determine inward shift based on the coordinate being outside the grid [0, L-1]
                 # Left edge: cx = -0.5 (shift +0.5)
@@ -421,45 +440,41 @@ class SurfaceCode:
                 
                 shifted_cx = cx + shift_x # Line where cx is shifted
                 shifted_cy = cy + shift_y # Line where cy is shifted
-                # --- END OF FIX: SHIFTING CENTER ---
-                
                 # Vector from original center (cx, cy) to midpoint of neighbors (mx, my)
                 mx, my = (neighbors[0][0] + neighbors[1][0])/2, (neighbors[0][1] + neighbors[1][1])/2
                 vec_x, vec_y = mx - cx, my - cy
-                
-                # Calculate the angle of the vector pointing from the center to the midpoint
                 pointing_angle = np.degrees(np.arctan2(vec_y, vec_x))
-                
-                # Flip the angle so the wedge points into the code
-                pointing_angle = (pointing_angle + 180) % 360  
-                
-                # Wedge spans 180 degrees centered on that new pointing angle
+                pointing_angle = (pointing_angle + 180) % 360
                 theta1 = pointing_angle - 90
                 theta2 = pointing_angle + 90
                 
-                # Use the shifted center and the correct radius (0.5)
                 wedge = Wedge((shifted_cx, shifted_cy), r=0.5, theta1=theta1, theta2=theta2, 
                               facecolor=color, edgecolor='black', alpha=0.9, linewidth=1)
                 ax.add_patch(wedge)
 
-        # 3. Plot X Stabilizers
         for i, idx in enumerate(x_indices):
             coord, qtype = self.index_mapping[idx]
             neighbors = self.get_surrounding_data_qubits(coord)
             plot_stabilizer_patch(coord, neighbors, qtype, x_results[i])
 
-        # 4. Plot Z Stabilizers
         for i, idx in enumerate(z_indices):
             coord, qtype = self.index_mapping[idx]
             neighbors = self.get_surrounding_data_qubits(coord)
             plot_stabilizer_patch(coord, neighbors, qtype, z_results[i])
 
-        # 5. Plot Data Qubits (White/Grey Circles)
         data_x = [c[0] for c in self.qubit_coords]
         data_y = [c[1] for c in self.qubit_coords]
         ax.scatter(data_x, data_y, s=200, color='#F0F0F0', edgecolor='black', zorder=10, label='Data Qubit')
 
-        # 6. Formatting
+        if show_ancillas:
+            x_stab_x = [coord[0] for coord in self.x_stabilisers_coords]
+            x_stab_y = [coord[1] for coord in self.x_stabilisers_coords]
+            z_stab_x = [coord[0] for coord in self.z_stabilisers_coords]
+            z_stab_y = [coord[1] for coord in self.z_stabilisers_coords]
+
+            ax.scatter(x_stab_x, x_stab_y, marker='s', s=100, color='tab:orange', label='X Ancilla', zorder=11)
+            ax.scatter(z_stab_x, z_stab_y, marker='s', s=100, color='tab:orange', label='Z Ancilla', zorder=11)
+
         ax.set_aspect('equal')
         ax.set_xticks(range(self.d))
         ax.set_yticks(range(self.d))
@@ -467,11 +482,10 @@ class SurfaceCode:
         ax.set_ylim(-1, self.d)
         ax.set_title(f"Syndrome Measurement (d={self.d})")
         
-        # Custom Legend
         legend_elements = [
-            Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (OK)'),
+            Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
             Patch(facecolor=colors['X_stab'][1], edgecolor='k', label='X-Syndrome (Error)'),
-            Patch(facecolor=colors['Z_stab'][0], edgecolor='k', label='Z-Stab (OK)'),
+            Patch(facecolor=colors['Z_stab'][0], edgecolor='k', label='Z-Stab (Ok)'),
             Patch(facecolor=colors['Z_stab'][1], edgecolor='k', label='Z-Syndrome (Error)'),
         ]
         ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.3, 1))
