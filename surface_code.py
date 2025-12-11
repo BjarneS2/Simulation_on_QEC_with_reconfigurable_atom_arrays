@@ -9,6 +9,7 @@ from matplotlib.patches import Polygon, Wedge, Patch
 from typing import List, Literal, Tuple, Dict, Any, Union, Optional
 import matplotlib as mpl
 import seaborn as sns
+import pymatching as pm
 import stim
 from copy import deepcopy 
 
@@ -273,7 +274,7 @@ class SurfaceCode:
             loop_body.append("TICK")  # type: ignore
             return loop_body
 
-    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z"):
+    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob: float = 0.0) -> None:
 
         for idx, (coord, _) in self.index_mapping.items():
             self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
@@ -298,7 +299,7 @@ class SurfaceCode:
         loop_body = self.loop_body()
         # One-shot stabilizer projection
         self.circuit += loop_body
-
+        
         t = dt # "time index"
 
         for j, anc in enumerate(self.stab_indices):
@@ -312,14 +313,7 @@ class SurfaceCode:
                 stim.target_rec(lookback), # [(t + j) | stim.target_record_bit],
                 [coord[0], coord[1], 0],
             )
-
-        """
-        Add circuit instructions here for multiple rounds
-        """
         
-        # Just add one X error for now:
-        self.circuit.append("X", 24) # type: ignore
-
         t +=  dt # increment the time index
         self.circuit.append("TICK") # type: ignore
         
@@ -354,6 +348,8 @@ class SurfaceCode:
             # measure X by rotating to Z then measuring
             self.circuit.append("H", data_indices) # type: ignore
             self.circuit.append("M", data_indices) # type: ignore
+            
+        self.circuit.append("OBSERVABLE_INCLUDE", [stim.target_rec(-1)], 0)
 
     def diagram(self, *args, **kwargs) -> None:
         """Prints a text diagram of the circuit."""
@@ -367,8 +363,28 @@ class SurfaceCode:
         results = sampler.sample(shots=shots)
         return results
  
+    def run_with_pymatching(self, shots: int = 1000):
+        model = self.circuit.detector_error_model(decompose_errors=True)
+        matching = pm.Matching.from_detector_error_model(model)
+        sampler = self.circuit.compile_detector_sampler()
+
+        syndrome, obs = sampler.sample(
+            shots=shots,
+            separate_observables=True
+        )
+
+        preds = matching.decode_batch(syndrome)
+
+        # logical error happens when observable prediction != actual
+        errors = np.any(preds != obs, axis=1)
+        logical_error_rate = np.mean(errors)
+
+        return logical_error_rate
+
+
     def visualize_results(self, result: np.ndarray, show_ancillas: bool = False) -> None:
         """ 
+        adapted from github/jfoliveira/surfq
         Visualize the measurement results on the surface code.
         Plots data qubits as circles and colors the plaquettes (stabilizers)
         based on the measurement outcome (Syndrome vs Normal).
