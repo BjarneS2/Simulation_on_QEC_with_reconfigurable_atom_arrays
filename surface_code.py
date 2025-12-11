@@ -302,34 +302,27 @@ class SurfaceCode:
         
         t = dt # "time index"
 
-        for j, anc in enumerate(self.stab_indices):
-            # first detection round (t=0) acts as the initialization round
-            coord, _ = self.index_mapping[anc]
-            # target the time j produced by the first M operation.
-
-            lookback = j - t
-            self.circuit.append(
-                "DETECTOR",
-                stim.target_rec(lookback), # [(t + j) | stim.target_record_bit],
-                [coord[0], coord[1], 0],
-            )
-        
-        t +=  dt # increment the time index
-        self.circuit.append("TICK") # type: ignore
         
         for rnd in range(1, rounds):
             # Shift coordinates 
             self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])  # type: ignore
+
+            if depolarize_prob > 0.0:
+                self.circuit.append("DEPOLARIZE1", data_indices, depolarize_prob)  # type: ignore
+                # self.circuit.append("X_ERROR", data_indices, depolarize_prob)  # type: ignore
+                # self.circuit.append("Y_ERROR", data_indices, depolarize_prob)  # type: ignore
+                # self.circuit.append("Z_ERROR", data_indices, depolarize_prob)  # type: ignore
+                
             self.circuit += loop_body
 
-            prev = t - dt
-            curr = t
+            # prev = t - dt
+            # curr = t
             for j, anc in enumerate(self.stab_indices):
                 coord, _ = self.index_mapping[anc]
                 # target the time j produced by the last M operation.
 
-                lookback_prev = (prev+j) - (t+dt) # look back to prev
-                lookback_curr = (curr+j) - (t+dt) # look back to curr
+                lookback_prev = - (dt-j) # (prev+j) - (t+dt) # look back to prev
+                lookback_curr = - (2*dt-j) # (curr+j) - (t+dt) # look back to curr
 
                 self.circuit.append(
                     "DETECTOR",
@@ -349,7 +342,8 @@ class SurfaceCode:
             self.circuit.append("H", data_indices) # type: ignore
             self.circuit.append("M", data_indices) # type: ignore
             
-        self.circuit.append("OBSERVABLE_INCLUDE", [stim.target_rec(-1)], 0)
+        logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
+        self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
     def diagram(self, *args, **kwargs) -> None:
         """Prints a text diagram of the circuit."""
