@@ -242,7 +242,7 @@ class SurfaceCode:
         plt.grid(True)
         plt.show()
 
-    def loop_body(self) -> stim.Circuit:
+    def loop_body(self, meas_errors = 0.0) -> stim.Circuit:
             """ Stabilizer Measurement Loop Body """
             loop_body = stim.Circuit()
             # Ancillas in Z basis
@@ -269,10 +269,80 @@ class SurfaceCode:
 
                 if qtype == 'X_stab':
                     loop_body.append("H", [ancilla_idx])  # type: ignore
-                    
+                
+            # Add measurement errors in form of depolarizing error on ancillas
+            # if meas_errors > 0.0:
+            #     loop_body.append("X_ERROR", self.stab_indices, meas_errors)  # type: ignore
+
             loop_body.append("M", self.stab_indices)  # type: ignore
             loop_body.append("TICK")  # type: ignore
             return loop_body
+
+    def loop_body_noisy(self, noise_params: Dict[str, float] = {}) -> stim.Circuit:
+            """
+            Stabilizer Measurement Loop Body with granular error injection.
+            noise_params keys: 'p_init', 'p_meas', 'p_gate1', 'p_gate2', 'p_idle'
+            """
+            # Default to 0.0 if not specified
+            p_init = noise_params.get("p_init", 0.0)
+            p_meas = noise_params.get("p_meas", 0.0)
+            p_gate1 = noise_params.get("p_gate1", 0.0)
+            p_gate2 = noise_params.get("p_gate2", 0.0)
+            p_idle = noise_params.get("p_idle", 0.0)
+
+            loop = stim.Circuit()
+
+            # 1. Initialization (Reset Ancillas)
+            loop.append("R", self.stab_indices) # type: ignore
+            if p_init > 0:
+                loop.append("X_ERROR", self.stab_indices, p_init) # Flip error after reset
+
+            # 2. Syndrome Extraction
+            for ancilla_idx in self.stab_indices:
+                coord, qtype = self.index_mapping[ancilla_idx]
+                neighbors = self.get_surrounding_data_qubits(coord)
+                
+                # X-Stabilizers need Basis Change (Hadamard)
+                if qtype == 'X_stab':
+                    loop.append("H", [ancilla_idx]) # type: ignore
+                    if p_gate1 > 0: 
+                        loop.append("DEPOLARIZE1", [ancilla_idx], p_gate1)
+
+                # CNOT sequence
+                for neighbor_coord in neighbors:
+                    neighbor_idx = self.inverse_mapping[neighbor_coord]
+                    
+                    # Determine Control/Target based on Stabilizer type
+                    if qtype == 'X_stab':
+                        targets = [ancilla_idx, neighbor_idx] # Ancilla is Control
+                    elif qtype == 'Z_stab':
+                        targets = [neighbor_idx, ancilla_idx] # Data is Control
+                    
+                    loop.append("CNOT", targets)  # type: ignore
+                    if p_gate2 > 0:
+                        loop.append("DEPOLARIZE2", targets, p_gate2) # type: ignore
+
+                # Basis Change back for X-Stabilizers
+                if qtype == 'X_stab':
+                    loop.append("H", [ancilla_idx])  # type: ignore
+                    if p_gate1 > 0: 
+                        loop.append("DEPOLARIZE1", [ancilla_idx], p_gate1)
+
+            # 3. Measurement
+            # Apply measurement error (probability of flipping the result)
+            if p_meas > 0:
+                loop.append("X_ERROR", self.stab_indices, p_meas)
+            loop.append("M", self.stab_indices) # type: ignore
+
+            # 4. Physical Idle Error
+            # Data qubits sit idle while ancillas are measured/reset. 
+            # We apply decoherence (Identity error) to all DATA qubits here.
+            if p_idle > 0:
+                data_qubits = self.get_data_qubits(_as="idx")
+                loop.append("DEPOLARIZE1", data_qubits, p_idle) # type: ignore
+
+            loop.append("TICK") # type: ignore
+            return loop
 
     def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob: float = 0.0) -> None:
 
@@ -313,16 +383,16 @@ class SurfaceCode:
                 # self.circuit.append("Y_ERROR", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("Z_ERROR", data_indices, depolarize_prob)  # type: ignore
                 
-            self.circuit += loop_body
+            self.circuit += self.loop_body(meas_errors=depolarize_prob/10)
 
-            # prev = t - dt
-            # curr = t
+            prev = t - dt
+            curr = t
             for j, anc in enumerate(self.stab_indices):
                 coord, _ = self.index_mapping[anc]
                 # target the time j produced by the last M operation.
 
-                lookback_prev = - (dt-j) # (prev+j) - (t+dt) # look back to prev
-                lookback_curr = - (2*dt-j) # (curr+j) - (t+dt) # look back to curr
+                lookback_prev = (prev+j) - (t+dt)# - (dt-j) # (prev+j) - (t+dt) # look back to prev
+                lookback_curr = (curr+j) - (t+dt) # - (2*dt-j) # (curr+j) - (t+dt) # look back to curr
 
                 self.circuit.append(
                     "DETECTOR",
@@ -345,18 +415,177 @@ class SurfaceCode:
         logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
         self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
-    def diagram(self, *args, **kwargs) -> None:
-        """Prints a text diagram of the circuit."""
-        print(self.circuit.diagram(*args, **kwargs))
+    def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
+                        noise_params: Optional[Dict[str, float]] = None) -> None:
+            
+            if noise_params is None:
+                noise_params = {}
 
-    def run_simulation(self, circuit: Optional[stim.Circuit] = None, shots: int = 1000) -> np.ndarray:
-        if circuit is not None:
-            sampler = circuit.compile_sampler()
-        else:
-            sampler = self.circuit.compile_sampler()
-        results = sampler.sample(shots=shots)
-        return results
- 
+            # --- Qubit Coordinates Setup (Same as before) ---
+            for idx, (coord, _) in self.index_mapping.items():
+                self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
+
+            data_indices = self.get_data_qubits(_as="idx")
+            dt = len(self.stab_indices)
+
+            # --- Logical State Prep ---
+            # Note: We apply errors to these initial operations too if desired
+            p_init = noise_params.get("p_init", 0.0)
+            p_gate1 = noise_params.get("p_gate1", 0.0)
+
+            self.circuit.append("R", data_indices)  # type: ignore
+            if p_init > 0: 
+                self.circuit.append("X_ERROR", data_indices, p_init)  # type: ignore
+
+            if logical_basis == "X":
+                self.circuit.append("H", data_indices)  # type: ignore
+                if p_gate1 > 0: 
+                    self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)  # type: ignore
+            
+            self.circuit.append("TICK")  # type: ignore
+            
+            # --- Rounds Loop ---
+            # Generate the loop body ONCE with noise parameters baked in
+            loop_body_circuit = self.loop_body_noisy(noise_params)
+            
+            # Add initial round
+            self.circuit += loop_body_circuit
+
+            t = dt 
+            
+            # Subsequent rounds
+            for rnd in range(1, rounds):
+                self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
+                self.circuit += loop_body_circuit
+
+                # Detector declaration (Same as before)
+                prev = t - dt
+                curr = t
+                for j, anc in enumerate(self.stab_indices):
+                    coord, _ = self.index_mapping[anc]
+                    lookback_prev = (prev+j) - (t+dt)
+                    lookback_curr = (curr+j) - (t+dt)
+                    self.circuit.append(
+                        "DETECTOR",
+                        [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
+                        [coord[0], coord[1], rnd]
+                    )
+                t += dt
+
+            # --- Logical Measurement ---
+            p_meas = noise_params.get("p_meas", 0.0)
+            
+            if logical_basis == "X":
+                self.circuit.append("H", data_indices)  # type: ignore
+                if p_gate1 > 0: 
+                    self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)  # type: ignore
+
+            if p_meas > 0:
+                self.circuit.append("X_ERROR", data_indices, p_meas)  # type: ignore
+                
+            self.circuit.append("M", data_indices)  # type: ignore
+            
+            logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
+            self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
+
+    def build_in_stim_noisy2(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
+                                noise_params: Optional[Dict[str, float]] = None) -> None:
+            
+            if noise_params is None: noise_params = {}
+            
+            # [Coordinates setup ... same as before]
+            for idx, (coord, _) in self.index_mapping.items():
+                self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
+
+            data_indices = self.get_data_qubits(_as="idx")
+            # Map data qubit indices to their position in the measurement array for easier lookup later
+            data_idx_to_meas_offset = {idx: i for i, idx in enumerate(data_indices)}
+            
+            dt = len(self.stab_indices)
+
+            # [Logical State Prep ... same as before]
+            p_init = noise_params.get("p_init", 0.0)
+            p_gate1 = noise_params.get("p_gate1", 0.0)
+            self.circuit.append("R", data_indices)
+            if p_init > 0: self.circuit.append("X_ERROR", data_indices, p_init)
+            if logical_basis == "X":
+                self.circuit.append("H", data_indices)
+                if p_gate1 > 0: self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)
+            self.circuit.append("TICK")
+            
+            # [Rounds Loop ... same as before]
+            loop_body_circuit = self.loop_body_noisy(noise_params)
+            self.circuit += loop_body_circuit # Round 0
+            t = dt 
+            
+            for rnd in range(1, rounds):
+                self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
+                self.circuit += loop_body_circuit
+                
+                # Bulk Detectors (Comparing Ancilla t vs Ancilla t-1)
+                prev = t - dt
+                curr = t
+                for j, anc in enumerate(self.stab_indices):
+                    coord, _ = self.index_mapping[anc]
+                    lookback_prev = (prev+j) - (t+dt)
+                    lookback_curr = (curr+j) - (t+dt)
+                    self.circuit.append("DETECTOR",
+                        [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
+                        [coord[0], coord[1], rnd]
+                    )
+                t += dt
+
+            # --- LOGICAL MEASUREMENT & FINAL BOUNDARY ---
+            p_meas = noise_params.get("p_meas", 0.0)
+            
+            # 1. Measure Data Qubits
+            if logical_basis == "X":
+                self.circuit.append("H", data_indices)
+                if p_gate1 > 0: self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)
+
+            if p_meas > 0:
+                self.circuit.append("X_ERROR", data_indices, p_meas)
+                
+            self.circuit.append("M", data_indices)
+
+            # 2. Add "End of Time" Detectors
+            # We need to compare the LAST ancilla measurement to the stabilizers 
+            # reconstructed from the data measurements.
+            
+            # Number of measurements in the final block (all data qubits)
+            num_data_meas = len(data_indices)
+            
+            # Determine which stabilizer type we can reconstruct (Z-stabs if measured in Z, X-stabs if X)
+            relevant_stab_type = "Z_stab" if logical_basis == "Z" else "X_stab"
+
+            for j, anc in enumerate(self.stab_indices):
+                coord, qtype = self.index_mapping[anc]
+                
+                # Only add detectors for the stabilizers compatible with the measurement basis
+                if qtype == relevant_stab_type:
+                    
+                    # Get the record index of the last ancilla measurement for this stabilizer
+                    # The ancilla measurements happened before the data measurements
+                    # So we look back past the data measurements (num_data_meas) to the ancilla block
+                    ancilla_lookback = j - dt - num_data_meas 
+                    
+                    # Construct the "pseudo-stabilizer" from data measurements
+                    # This involves XORing the measurements of the data qubits involved in this stabilizer
+                    neighbors = self.get_surrounding_data_qubits(coord)
+                    rec_targets = [stim.target_rec(ancilla_lookback)]
+                    
+                    for n_coord in neighbors:
+                        n_idx = self.inverse_mapping[n_coord]
+                        # Find where this data qubit is in the measurement record (0 to -num_data_meas)
+                        meas_offset = data_idx_to_meas_offset[n_idx] - num_data_meas
+                        rec_targets.append(stim.target_rec(meas_offset))
+                    
+                    self.circuit.append("DETECTOR", rec_targets, [coord[0], coord[1], rounds])
+
+            # 3. Logical Observable (Same as before)
+            logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
+            self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
+
     def run_with_pymatching(self, shots: int = 1000):
         model = self.circuit.detector_error_model(decompose_errors=True)
         matching = pm.Matching.from_detector_error_model(model)
@@ -373,8 +602,19 @@ class SurfaceCode:
         errors = np.any(preds != obs, axis=1)
         logical_error_rate = np.mean(errors)
 
-        return logical_error_rate
+        return logical_error_rate, syndrome, obs, preds
 
+    def run_simulation(self, circuit: Optional[stim.Circuit] = None, shots: int = 1000) -> np.ndarray:
+        if circuit is not None:
+            sampler = circuit.compile_sampler()
+        else:
+            sampler = self.circuit.compile_sampler()
+        results = sampler.sample(shots=shots)
+        return results
+ 
+    def diagram(self, *args, **kwargs) -> None:
+        """Prints a text diagram of the circuit."""
+        print(self.circuit.diagram(*args, **kwargs))
 
     def visualize_results(self, result: np.ndarray, show_ancillas: bool = False) -> None:
         """ 
