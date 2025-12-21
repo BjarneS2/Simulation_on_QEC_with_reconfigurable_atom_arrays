@@ -197,6 +197,7 @@ class MultiLogicalSurfaceCode:
 
         # 3. Measurement
         if p_meas > 0:
+            print("here adding errs")
             loop.append("X_ERROR", all_stab_indices, p_meas)
         loop.append("M", all_stab_indices) # type: ignore
 
@@ -412,4 +413,34 @@ class MultiLogicalSurfaceCode:
         results:np.ndarray = sampler.sample(shots=shots) # type: ignore
         return results
 
+    def diagram(self) -> None:
+        print(self.circuit.diagram())
 
+    def apply_logical_gate(self, gate: str, control: int, target: int):
+
+        # should be able to perform logical gates, e.g. CNOT between logical qubits
+        if gate == "CNOT":
+            if control >= self.num_logical_qubits or target >= self.num_logical_qubits:
+                raise ValueError("Control or target logical qubit index out of range.")
+
+            # now do CNOT from control to target 
+            
+        else:
+            raise NotImplementedError(f"Logical gate {gate} not implemented.")
+
+        pass
+
+    # TODO:
+    """
+    Implement CNOT and enable initialization in different logical bases (X or Z).
+    Implement logical measurement in different bases (X or Z).
+    
+    ---
+    verify that stabilizer measurements work correctly : Also that error mapping is correct.
+    for that initialized and add some errors and see if syndromes are correct.
+    e.g. only one logical qubit (which should be control) will have errors and syndromes
+    this should be visible and mapped onto the second logical qubit (target) after CNOT.
+    ---
+
+    Implement correlated decoder that can handle multiple logical qubits.
+    """
