@@ -40,6 +40,7 @@ class MultiLogicalSurfaceCode:
         self.num_logical_qubits = num_logical_qubits
         self.seed = seed
         self.circuit = stim.Circuit()
+        self.quantum_algorithm: Optional[stim.Circuit] = None
         
         # Initialize lattices
         self._initialize_lattice()
@@ -211,11 +212,18 @@ class MultiLogicalSurfaceCode:
         loop.append("TICK") # type: ignore
         return loop
 
-    def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
+    def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Union[List[Literal["X", "Z"]], Literal["X", "Z"]] = "Z", 
                             noise_params: Optional[Dict[str, float]] = None) -> None:
         if noise_params is None:
             noise_params = {}
-            
+
+        if isinstance(logical_basis, str) or len(logical_basis) != self.num_logical_qubits:
+            logic_basis = [logical_basis] * self.num_logical_qubits
+        elif len(logical_basis) != self.num_logical_qubits:
+            raise ValueError("Length of logical_basis list must match num_logical_qubits.")
+        else:
+            logic_basis = logical_basis
+
         # Qubit Coords
         for idx, (coord, _) in self.index_mapping.items():
             self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
@@ -237,22 +245,30 @@ class MultiLogicalSurfaceCode:
 
         # Logical State Prep
         self.circuit.append("R", all_data_indices) # type: ignore
+        
         if p_init > 0:
             self.circuit.append("X_ERROR", all_data_indices, p_init)
-            
-        if logical_basis == "X":
-            self.circuit.append("H", all_data_indices) # type: ignore
-            if p_gate1 > 0:
-                self.circuit.append("DEPOLARIZE1", all_data_indices, p_gate1)
+
+        for i, basis in enumerate(logic_basis):  # initialize in logical |0> or |+> depending on logic_basis
+            lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
+            if basis == "X":
+                self.circuit.append("H", lq_data_indices) # type: ignore
         
+        if p_init > 0:
+            self.circuit.append("DEPOLARIZE1", all_data_indices) # type: ignore
+
+
         self.circuit.append("TICK") # type: ignore
         
-        # Rounds Loop
+        # Rounds ~ Loop
         loop_body = self.loop_body_noisy(noise_params)
         self.circuit += loop_body
         
+        # After initial round -> add the quantum algorithm that you want to simulate
+        if self.quantum_algorithm is not None:
+            self.circuit += self.quantum_algorithm
+
         t = dt
-        
         for rnd in range(1, rounds):
             self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
             self.circuit += loop_body
@@ -278,18 +294,20 @@ class MultiLogicalSurfaceCode:
             
             t += dt
             
-        # Logical Measurement
-        if logical_basis == "X":
-            self.circuit.append("H", all_data_indices) # type: ignore
-            if p_gate1 > 0:
-                self.circuit.append("DEPOLARIZE1", all_data_indices, p_gate1)
-                
-        if p_meas > 0:
-            self.circuit.append("X_ERROR", all_data_indices, p_meas)
+        for i, basis in enumerate(logic_basis):
+            lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
             
-        self.circuit.append("M", all_data_indices) # type: ignore
-        
-        # Observables
+            if basis == "X":
+                self.circuit.append("H", lq_data_indices) # type: ignore
+                if p_gate1 >0:
+                    self.circuit.append("DEPOLARIZE1", lq_data_indices) # type: ignore
+            if p_meas > 0:
+                self.circuit.append("X_ERROR", all_data_indices, p_meas)
+
+            self.circuit.append("M", all_data_indices) # type: ignore
+            
+        # Observables -- NOTE: Why this so complicated here? Was it to differentiate 
+                             # the multiple surface codes for decoding?
         current_data_meas_offset = 0
         for i in range(self.num_logical_qubits):
             lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
@@ -403,6 +421,7 @@ class MultiLogicalSurfaceCode:
         )
         
         preds = matching.decode_batch(syndrome)
+        print(np.array(preds).shape, preds)
         errors = np.any(preds != obs, axis=1)
         logical_error_rate = np.mean(errors)
         
@@ -416,15 +435,24 @@ class MultiLogicalSurfaceCode:
     def diagram(self) -> None:
         print(self.circuit.diagram())
 
-    def apply_logical_gate(self, gate: str, control: int, target: int):
+    def apply_logical_gate(self, gate: str, control: int, target: int, noise_params: Dict[str, float] = {}) -> None:
+
+        if self.quantum_algorithm is None:
+            self.quantum_algorithm = stim.Circuit()
+        
+        p_gate2 = noise_params.get("p_gate2", 0.0)
 
         # should be able to perform logical gates, e.g. CNOT between logical qubits
         if gate == "CNOT":
             if control >= self.num_logical_qubits or target >= self.num_logical_qubits:
                 raise ValueError("Control or target logical qubit index out of range.")
 
-            # now do CNOT from control to target 
-            
+            control_data_indices = self.logical_qubits[str(control)]["data_indices"]
+            target_data_indices = self.logical_qubits[str(target)]["data_indices"]
+            for c_idx, t_idx in zip(control_data_indices, target_data_indices):
+                self.quantum_algorithm.append("CNOT", [c_idx, t_idx]) # type: ignore
+                if p_gate2 > 0:
+                    self.quantum_algorithm.append("DEPOLARIZE2", [c_idx, t_idx], p_gate2) # type: ignore
         else:
             raise NotImplementedError(f"Logical gate {gate} not implemented.")
 
@@ -432,8 +460,19 @@ class MultiLogicalSurfaceCode:
 
     # TODO:
     """
-    Implement CNOT and enable initialization in different logical bases (X or Z).
-    Implement logical measurement in different bases (X or Z).
+    Verify correctness:
+    Initialize both in Z basis (0) and add a logical X error on one logical qubit.
+    After performing a logical CNOT, measure both in Z basis and verify that
+    the error has been mapped correctly to the second logical qubit.
+
+    Do this with some qubits or more errors and see if syndromes match expectations.
+    Just go through the indices again and see if everything is correct.
+    Cross-check with single logical qubit surface code!!!
+
+    Check state initialization of states as well:
+    https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-022-04566-8/MediaObjects/41586_2022_4566_MOESM1_ESM.pdf
+    this is example for distance 3 surface code with one logical qubit
+    if I have verified this then I obviously can extend this to multiple and larger surface codes.
     
     ---
     verify that stabilizer measurements work correctly : Also that error mapping is correct.
