@@ -6,6 +6,7 @@ I want to use the Surface Code class to initialize a surface code of a given dis
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon, Wedge, Patch
+from matplotlib.lines import Line2D
 from typing import List, Literal, Tuple, Dict, Any, Union, Optional
 import matplotlib as mpl
 import seaborn as sns
@@ -185,8 +186,8 @@ class SurfaceCode:
         
         surrounding_qubits: List[Tuple[int, int]] = []
         x, y = stab_coord
-        deltaZ = [(0.5, 0.5), (0.5, -0.5), (-0.5, 0.5), (-0.5, -0.5)]
-        deltaX = [(0.5, 0.5), (-0.5, 0.5), (0.5, -0.5), (-0.5, -0.5)]
+        deltaZ = [(0.5, -0.5), (0.5, 0.5), (-0.5, -0.5), (-0.5, 0.5)]
+        deltaX = [(0.5, -0.5), (-0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)]
         deltas = deltaZ if stab_coord in self.z_stabilisers_coords else deltaX
         for dx, dy in deltas:
             neighbor_coord: Tuple[int, int] = ((x + dx), (y + dy)) # type: ignore
@@ -616,7 +617,9 @@ class SurfaceCode:
         """Prints a text diagram of the circuit."""
         print(self.circuit.diagram(*args, **kwargs))
 
-    def visualize_results(self, result: np.ndarray, show_ancillas: bool = False) -> None:
+    def visualize_results(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
+                          x_err: List[Union[int, Tuple[float, float]]] = [], 
+                          z_err: List[Union[int, Tuple[float, float]]] = []) -> None:
         """ 
         adapted from github/jfoliveira/surfq
         Visualize the measurement results on the surface code.
@@ -625,6 +628,8 @@ class SurfaceCode:
         results: Array of measurement (list of bools or 0/1) for all stabilizers.
         show_ancillas: If True, shows ancilla qubits as squares on the plot.
         """
+        if result is None:
+            result = self.get_syndrome(x_errors=x_err, z_errors=z_err)
         
         sns.set_style("darkgrid")
         mpl.rcParams.update(  
@@ -712,9 +717,36 @@ class SurfaceCode:
             neighbors = self.get_surrounding_data_qubits(coord)
             plot_stabilizer_patch(coord, neighbors, qtype, z_results[i])
 
+        def to_coords(errors):
+            coords = set()
+            for e in errors:
+                if isinstance(e, int):
+                    if e in self.index_mapping:
+                        coords.add(self.index_mapping[e][0])
+                elif isinstance(e, tuple):
+                     coords.add(e)
+            return coords
+        x_error_coords = to_coords(x_err)
+        z_error_coords = to_coords(z_err)
+
         data_x = [c[0] for c in self.qubit_coords]
         data_y = [c[1] for c in self.qubit_coords]
-        ax.scatter(data_x, data_y, s=200, color='#F0F0F0', edgecolor='black', zorder=10, label='Data Qubit')
+        
+        data_colors = []
+        for coord in self.qubit_coords:
+            has_x = coord in x_error_coords
+            has_z = coord in z_error_coords
+            
+            if has_x and has_z:
+                data_colors.append('cyan')
+            elif has_x:
+                data_colors.append('gold')
+            elif has_z:
+                data_colors.append('palegreen')
+            else:
+                data_colors.append('#F0F0F0')
+
+        ax.scatter(data_x, data_y, s=200, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
 
         if show_ancillas:
             x_stab_x = [coord[0] for coord in self.x_stabilisers_coords]
@@ -722,23 +754,50 @@ class SurfaceCode:
             z_stab_x = [coord[0] for coord in self.z_stabilisers_coords]
             z_stab_y = [coord[1] for coord in self.z_stabilisers_coords]
 
-            ax.scatter(x_stab_x, x_stab_y, marker='s', s=100, color='tab:orange', label='X Ancilla', zorder=11)
-            ax.scatter(z_stab_x, z_stab_y, marker='s', s=100, color='tab:orange', label='Z Ancilla', zorder=11)
+            ax.scatter(x_stab_x, x_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='X Ancilla', zorder=11)
+            ax.scatter(z_stab_x, z_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='Z Ancilla', zorder=11)
+
+        if show_index:
+            for index, (coord, qtype) in self.index_mapping.items():
+                # Determine text color for visibility
+                if qtype == 'data':
+                    t_color = 'black'
+                else:
+                    t_color = 'black' if show_ancillas else 'white'
+                    
+                ax.text(coord[0]+0.005, coord[1], str(index), color=t_color, 
+                        fontsize=8, ha='center', va='center', zorder=12)
 
         ax.set_aspect('equal')
         ax.set_xticks(range(self.d))
         ax.set_yticks(range(self.d))
         ax.set_xlim(-1, self.d)
         ax.set_ylim(-1, self.d)
-        ax.set_title(f"Syndrome Measurement (d={self.d})")
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        # ax.tick_params(axis='x', which='both', bottom=False, top=False)
+        # ax.tick_params(axis='y', which='both', bottom=False, top=False)
+        
+        # ax.set_title(f"Syndrome Measurement (d={self.d})")
         
         legend_elements = [
             Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
             Patch(facecolor=colors['X_stab'][1], edgecolor='k', label='X-Syndrome (Error)'),
             Patch(facecolor=colors['Z_stab'][0], edgecolor='k', label='Z-Stab (Ok)'),
             Patch(facecolor=colors['Z_stab'][1], edgecolor='k', label='Z-Syndrome (Error)'),
+            Line2D([0], [0], marker='o', color='w', label='Data Qubit (No Error)',
+                          markerfacecolor='#F0F0F0', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Ancilla Qubit',
+                          markerfacecolor='silver', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='X Error (On Data)',
+                          markerfacecolor='gold', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Z Error (On Data)',
+                          markerfacecolor='palegreen', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Y Error (On Data)',
+                          markerfacecolor='cyan', markersize=10, markeredgecolor='k'),
+            
         ]
-        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.3, 1))
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
         
         plt.tight_layout()
         plt.show()
@@ -944,3 +1003,61 @@ class SurfaceCode:
         else:
             return []
         
+    def get_syndrome(self, x_errors: List[Union[int, Tuple[float, float]]] = [], z_errors: List[Union[int, Tuple[float, float]]] = []) -> np.ndarray:
+        """
+        Calculate the syndrome given lists of X and Z errors on data qubits.
+        X errors are detected by Z stabilizers.
+        Z errors are detected by X stabilizers.
+        
+        The returned syndrome follows the order:
+        1. All X-stabilizers (sorted as in stab_indices)
+        2. All Z-stabilizers (sorted as in stab_indices)
+        This matches the expectation of visualize_results.
+        """
+        
+        # Helper to ensure we work with coordinates
+        def to_coords(errors):
+            coords = set()
+            for e in errors:
+                if isinstance(e, int):
+                    # verify valid index
+                    if e in self.index_mapping:
+                        coords.add(self.index_mapping[e][0])
+                elif isinstance(e, tuple):
+                     coords.add(e)
+            return coords
+
+        x_error_coords = to_coords(x_errors)
+        z_error_coords = to_coords(z_errors)
+
+        # Split into X and Z based on the correct ordering
+        x_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
+        z_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
+        
+        syndrome = []
+
+        # 1. X Stabilizers (detect Z errors)
+        for anc in x_stab_indices:
+            coord, _ = self.index_mapping[anc]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            # Check parity of Z errors on neighbors
+            parity = 0
+            for n_coord in neighbors:
+                if n_coord in z_error_coords:
+                    parity += 1
+            syndrome.append(parity % 2)
+
+        # 2. Z Stabilizers (detect X errors)
+        for anc in z_stab_indices:
+            coord, _ = self.index_mapping[anc]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            # Check parity of X errors on neighbors
+            parity = 0
+            for n_coord in neighbors:
+                if n_coord in x_error_coords:
+                    parity += 1
+            syndrome.append(parity % 2)
+
+        return np.array(syndrome, dtype=int)
+
+

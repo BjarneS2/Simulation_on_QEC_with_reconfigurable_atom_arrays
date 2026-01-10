@@ -56,6 +56,7 @@ class MultiLogicalSurfaceCode:
         for i in range(self.num_logical_qubits):
             # Create coordinates using SurfaceCode static method
             data_coords, x_stab_coords, z_stab_coords = SurfaceCode.create(self.distance)
+            print(data_coords, x_stab_coords, z_stab_coords)
             
             # Shift coordinates
             shift_x = i * (self.distance + 1)
@@ -249,6 +250,13 @@ class MultiLogicalSurfaceCode:
         if p_init > 0:
             self.circuit.append("X_ERROR", all_data_indices, p_init)
 
+        self.circuit.append("TICK") # type: ignore
+        
+        # Rounds ~ Loop
+        loop_body = self.loop_body_noisy(noise_params)
+        self.circuit += loop_body
+
+        # Go from logical 0 to |+> if needed:
         for i, basis in enumerate(logic_basis):  # initialize in logical |0> or |+> depending on logic_basis
             lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
             if basis == "X":
@@ -256,17 +264,13 @@ class MultiLogicalSurfaceCode:
         
         if p_init > 0:
             self.circuit.append("DEPOLARIZE1", all_data_indices) # type: ignore
-
-
-        self.circuit.append("TICK") # type: ignore
-        
-        # Rounds ~ Loop
-        loop_body = self.loop_body_noisy(noise_params)
-        self.circuit += loop_body
         
         # After initial round -> add the quantum algorithm that you want to simulate
         if self.quantum_algorithm is not None:
+            print("This is executed")
             self.circuit += self.quantum_algorithm
+        
+        self.circuit.append("TICK") # type: ignore
 
         t = dt
         for rnd in range(1, rounds):
@@ -291,8 +295,24 @@ class MultiLogicalSurfaceCode:
                         [coord[0], coord[1], rnd]
                     )
                     global_stab_idx += 1
-            
+
+            # Add detectors for all stabilizers (ordering aligned with measurement order)
+            # for j, anc in enumerate(all_stab_indices):
+            #     coord, _ = self.index_mapping[anc]
+            #     lookback_prev = (prev + j) - (t + dt)
+            #     lookback_curr = (curr + j) - (t + dt)
+                
+            #     self.circuit.append(
+            #         "DETECTOR",
+            #         [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
+            #         [coord[0], coord[1], rnd]
+            #     )
+
+
             t += dt
+
+        # if self.quantum_algorithm is not None:
+        #     self.circuit += self.quantum_algorithm
             
         for i, basis in enumerate(logic_basis):
             lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
@@ -321,7 +341,117 @@ class MultiLogicalSurfaceCode:
             self.circuit.append("OBSERVABLE_INCLUDE", targets, i)
             current_data_meas_offset += num_lq_data
 
-    def visualize_results(self, result: np.ndarray, show_ancillas: bool = False):
+    def build_in_stim_noisy_new(self, rounds: int = 1, logical_basis: Union[List[Literal["X", "Z"]], Literal["X", "Z"]] = "Z", 
+                            noise_params: Optional[Dict[str, float]] = None) -> None:
+        if noise_params is None:
+            noise_params = {}
+
+        if isinstance(logical_basis, str) or len(logical_basis) != self.num_logical_qubits:
+            logic_basis = [logical_basis] * self.num_logical_qubits
+        elif len(logical_basis) != self.num_logical_qubits:
+            raise ValueError("Length of logical_basis list must match num_logical_qubits.")
+        else:
+            logic_basis = logical_basis
+
+        # Qubit Coords
+        for idx, (coord, _) in self.index_mapping.items():
+            self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
+            
+        # Collect all data indices
+        all_data_indices = []
+        for i in range(self.num_logical_qubits):
+            all_data_indices.extend(self.logical_qubits[str(i)]["data_indices"])
+            
+        # Collect all stab indices for dt calculation
+        all_stab_indices = []
+        for i in range(self.num_logical_qubits):
+            all_stab_indices.extend(self.logical_qubits[str(i)]["stab_indices"])
+        dt = len(all_stab_indices)
+        
+        p_init = noise_params.get("p_init", 0.0)
+        p_gate1 = noise_params.get("p_gate1", 0.0)
+        p_meas = noise_params.get("p_meas", 0.0)
+
+        # Logical State Prep
+        self.circuit.append("R", all_data_indices) # type: ignore
+        
+        if p_init > 0:
+            self.circuit.append("X_ERROR", all_data_indices, p_init)
+
+        self.circuit.append("TICK") # type: ignore
+        
+        # Prepare logical basis (|0> or |+>) on data
+        for i, basis in enumerate(logic_basis):
+            lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
+            if basis == "X":
+                self.circuit.append("H", lq_data_indices) # type: ignore
+        if p_init > 0:
+            self.circuit.append("DEPOLARIZE1", all_data_indices) # type: ignore
+
+        # Insert logical algorithm before any detector-linked rounds
+        if self.quantum_algorithm is not None:
+            self.circuit += self.quantum_algorithm
+        self.circuit.append("TICK") # type: ignore
+
+        # Syndrome rounds after algorithm; detectors compare consecutive rounds only
+        loop_body = self.loop_body_noisy(noise_params)
+        total_meas = 0
+        prev_start: Optional[int] = None
+
+        for rnd in range(rounds):
+            if rnd > 0:
+                self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
+
+            curr_start = total_meas
+            self.circuit += loop_body
+            total_meas += dt
+
+            if prev_start is not None:
+                global_stab_idx = 0
+                for i in range(self.num_logical_qubits):
+                    stabs = self.logical_qubits[str(i)]["stab_indices"]
+                    for anc in stabs:
+                        coord, _ = self.index_mapping[anc]
+                        lookback_prev = (prev_start + global_stab_idx) - total_meas
+                        lookback_curr = (curr_start + global_stab_idx) - total_meas
+                        self.circuit.append(
+                            "DETECTOR",
+                            [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
+                            [coord[0], coord[1], rnd]
+                        )
+                        global_stab_idx += 1
+
+            prev_start = curr_start
+
+        for i, basis in enumerate(logic_basis):
+            lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
+            
+            if basis == "X":
+                self.circuit.append("H", lq_data_indices) # type: ignore
+                if p_gate1 >0:
+                    self.circuit.append("DEPOLARIZE1", lq_data_indices) # type: ignore
+            if p_meas > 0:
+                self.circuit.append("X_ERROR", all_data_indices, p_meas)
+
+            self.circuit.append("M", all_data_indices) # type: ignore
+            
+        # Observables -- NOTE: Why this so complicated here? Was it to differentiate 
+                             # the multiple surface codes for decoding?
+        current_data_meas_offset = 0
+        for i in range(self.num_logical_qubits):
+            lq_data_indices = self.logical_qubits[str(i)]["data_indices"]
+            num_lq_data = len(lq_data_indices)
+            
+            targets = []
+            for k in range(num_lq_data):
+                rec_idx = (current_data_meas_offset + k) - len(all_data_indices)
+                targets.append(stim.target_rec(rec_idx))
+            
+            self.circuit.append("OBSERVABLE_INCLUDE", targets, i)
+            current_data_meas_offset += num_lq_data
+
+
+    def visualize_results_old(self, result: np.ndarray, show_ancillas: bool = False):
         sns.set_style("darkgrid")
         mpl.rcParams.update({
             "font.size": 12,
@@ -410,6 +540,117 @@ class MultiLogicalSurfaceCode:
         ax.set_title(f"Multi-Logical Qubit Surface Code (d={self.distance}, N={self.num_logical_qubits})")
         plt.show()
 
+    def visualize_results(self, result: np.ndarray, show_ancillas: bool = False, show_indices: bool = False):
+        sns.set_style("darkgrid")
+        mpl.rcParams.update({
+            "font.size": 12,
+            "grid.color": "0.5",
+            "grid.linestyle": "--",
+            "grid.linewidth": 0.6,
+            "xtick.color": "black",
+            "ytick.color": "black",
+        })
+        
+        colors = {
+            'X_stab': {0: "#79ABD4", 1: "#F07084"},
+            'Z_stab': {0: "#385B8B", 1: "#9D212F"}
+        }
+        
+        total_width = self.num_logical_qubits * (self.distance + 1)
+        fig, ax = plt.subplots(figsize=(total_width, self.distance + 2))
+        
+        all_stab_indices = []
+        for i in range(self.num_logical_qubits):
+            all_stab_indices.extend(self.logical_qubits[str(i)]["stab_indices"])
+            
+        def plot_stabilizer_patch(coord, neighbors, qtype, val):
+            center_x, center_y = coord
+            neighbors = sorted(neighbors, key=lambda p: np.arctan2(p[1] - center_y, p[0] - center_x))
+            
+            if len(neighbors) == 4:
+                poly = Polygon(neighbors, closed=True, facecolor=colors[qtype][val], edgecolor='black', alpha=0.7)
+                ax.add_patch(poly)
+            elif len(neighbors) == 2:
+                # Boundary Stabilizer -> Wedge
+                mx = (neighbors[0][0] + neighbors[1][0]) / 2
+                my = (neighbors[0][1] + neighbors[1][1]) / 2
+                vec_x = mx - center_x
+                vec_y = my - center_y
+                angle = np.degrees(np.arctan2(vec_y, vec_x))
+                pointing_angle = (angle + 180) % 360
+                theta1 = pointing_angle - 90
+                theta2 = pointing_angle + 90
+                
+                wedge = Wedge((mx, my), r=0.5, theta1=theta1, theta2=theta2,
+                              facecolor=colors[qtype][val], edgecolor='black', alpha=0.7)
+                ax.add_patch(wedge)
+
+        # 1. Plot Active Stabilizers (Results)
+        for i, idx in enumerate(all_stab_indices):
+            if i >= len(result): 
+                break
+            val = result[i]
+            coord, qtype = self.index_mapping[idx]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            plot_stabilizer_patch(coord, neighbors, qtype, val)
+            
+            # Add Index Text for Active Stabilizers
+            if show_indices:
+                # Use White text for better contrast on dark red/blue patches
+                ax.text(coord[0], coord[1], str(idx), color='white', 
+                        ha='center', va='center', fontsize=9, fontweight='bold', zorder=20)
+            
+        # 2. Plot Data Qubits
+        data_coords = [c for c in self.all_qubits_coords if self.index_mapping[self.inverse_mapping[c]][1] == 'data']
+        data_x = [c[0] for c in data_coords]
+        data_y = [c[1] for c in data_coords]
+        
+        ax.scatter(data_x, data_y, s=100, color='#F0F0F0', edgecolor='black', zorder=10, label='Data Qubit')
+        
+        # Add Index Text for Data Qubits
+        if show_indices:
+            for c in data_coords:
+                idx = self.inverse_mapping[c]
+                ax.text(c[0], c[1], str(idx), color='black', 
+                        ha='center', va='center', fontsize=8, zorder=21)
+        
+        # 3. Plot Inactive Ancillas (Background)
+        if show_ancillas:
+            anc_coords = [c for c in self.all_qubits_coords if 'stab' in self.index_mapping[self.inverse_mapping[c]][1]]
+            anc_x = [c[0] for c in anc_coords]
+            anc_y = [c[1] for c in anc_coords]
+            ax.scatter(anc_x, anc_y, s=50, color='gray', marker='s', zorder=11)
+
+            # Add Index Text for Inactive Ancillas (if not already plotted by result loop)
+            # (Optional: This handles ancillas that might exist but weren't in the result list)
+            if show_indices:
+                # Get set of indices already plotted to avoid overlap
+                active_indices = set(all_stab_indices[:len(result)])
+                for c in anc_coords:
+                    idx = self.inverse_mapping[c]
+                    if idx not in active_indices:
+                         ax.text(c[0], c[1], str(idx), color='white', 
+                                 ha='center', va='center', fontsize=8, zorder=21)
+
+        # 4. Draw Logical Boundaries
+        for i in range(self.num_logical_qubits):
+            shift_x = i * (self.distance + 1)
+            rect_patch = plt.Rectangle(
+                (shift_x - 0.8, -0.8), 
+                self.distance + 0.6, 
+                self.distance + 0.6,
+                fill=False,
+                edgecolor='purple',
+                linewidth=3,
+                linestyle='--'
+            )
+            ax.add_patch(rect_patch)
+            ax.text(shift_x + self.distance/2 - 0.5, -1.2, f"L{i}", color='purple', fontsize=14, fontweight='bold')
+
+        ax.set_aspect('equal')
+        ax.set_title(f"Multi-Logical Qubit Surface Code (d={self.distance}, N={self.num_logical_qubits})")
+        plt.show()
+
     def run_with_pymatching(self, shots: int = 1000):
         model = self.circuit.detector_error_model(decompose_errors=True)
         matching = pm.Matching.from_detector_error_model(model)
@@ -436,9 +677,10 @@ class MultiLogicalSurfaceCode:
         print(self.circuit.diagram())
 
     def apply_logical_gate(self, gate: str, control: int, target: int, noise_params: Dict[str, float] = {}) -> None:
-
+        
         if self.quantum_algorithm is None:
             self.quantum_algorithm = stim.Circuit()
+            # I need to ensure that there are no conflicts in indices here!
         
         p_gate2 = noise_params.get("p_gate2", 0.0)
 
@@ -449,6 +691,9 @@ class MultiLogicalSurfaceCode:
 
             control_data_indices = self.logical_qubits[str(control)]["data_indices"]
             target_data_indices = self.logical_qubits[str(target)]["data_indices"]
+
+            print(f"These are the control data indices: {control_data_indices}\n"
+                  f"and these are the target data indices: {target_data_indices}")
             for c_idx, t_idx in zip(control_data_indices, target_data_indices):
                 self.quantum_algorithm.append("CNOT", [c_idx, t_idx]) # type: ignore
                 if p_gate2 > 0:
@@ -456,7 +701,7 @@ class MultiLogicalSurfaceCode:
         else:
             raise NotImplementedError(f"Logical gate {gate} not implemented.")
 
-        pass
+        self.quantum_algorithm.diagram()
 
     # TODO:
     """
@@ -482,4 +727,9 @@ class MultiLogicalSurfaceCode:
     ---
 
     Implement correlated decoder that can handle multiple logical qubits.
+
+
+
+    Just another good source I found!!!:
+    https://textbook.riverlane.com/en/latest/notebooks/ch5-decoding-surfcodes/simulating-surface-codes-stim.html
     """
