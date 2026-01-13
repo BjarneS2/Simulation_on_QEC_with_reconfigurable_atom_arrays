@@ -284,7 +284,6 @@ class SurfaceCode:
             Stabilizer Measurement Loop Body with granular error injection.
             noise_params keys: 'p_init', 'p_meas', 'p_gate1', 'p_gate2', 'p_idle'
             """
-            # Default to 0.0 if not specified
             p_init = noise_params.get("p_init", 0.0)
             p_meas = noise_params.get("p_meas", 0.0)
             p_gate1 = noise_params.get("p_gate1", 0.0)
@@ -293,27 +292,20 @@ class SurfaceCode:
 
             loop = stim.Circuit()
 
-            # 1. Initialization (Reset Ancillas)
             loop.append("R", self.stab_indices) # type: ignore
             if p_init > 0:
-                loop.append("X_ERROR", self.stab_indices, p_init) # Flip error after reset
-
-            # 2. Syndrome Extraction
-            for ancilla_idx in self.stab_indices:
+                loop.append("X_ERROR", self.stab_indices, p_init) 
+                
+            for ancilla_idx in self.stab_indices[::-1]:
                 coord, qtype = self.index_mapping[ancilla_idx]
                 neighbors = self.get_surrounding_data_qubits(coord)
                 
-                # X-Stabilizers need Basis Change (Hadamard)
                 if qtype == 'X_stab':
                     loop.append("H", [ancilla_idx]) # type: ignore
-                    if p_gate1 > 0: 
-                        loop.append("DEPOLARIZE1", [ancilla_idx], p_gate1)
 
-                # CNOT sequence
                 for neighbor_coord in neighbors:
                     neighbor_idx = self.inverse_mapping[neighbor_coord]
                     
-                    # Determine Control/Target based on Stabilizer type
                     if qtype == 'X_stab':
                         targets = [ancilla_idx, neighbor_idx] # Ancilla is Control
                     elif qtype == 'Z_stab':
@@ -322,22 +314,20 @@ class SurfaceCode:
                     loop.append("CNOT", targets)  # type: ignore
                     if p_gate2 > 0:
                         loop.append("DEPOLARIZE2", targets, p_gate2) # type: ignore
+                    # loop.append("TICK") # type: ignore
 
-                # Basis Change back for X-Stabilizers
                 if qtype == 'X_stab':
                     loop.append("H", [ancilla_idx])  # type: ignore
                     if p_gate1 > 0: 
                         loop.append("DEPOLARIZE1", [ancilla_idx], p_gate1)
 
-            # 3. Measurement
-            # Apply measurement error (probability of flipping the result)
+                loop.append("TICK") # type: ignore
+
             if p_meas > 0:
                 loop.append("X_ERROR", self.stab_indices, p_meas)
             loop.append("M", self.stab_indices) # type: ignore
+            loop.append("TICK") # type: ignore
 
-            # 4. Physical Idle Error
-            # Data qubits sit idle while ancillas are measured/reset. 
-            # We apply decoherence (Identity error) to all DATA qubits here.
             if p_idle > 0:
                 data_qubits = self.get_data_qubits(_as="idx")
                 loop.append("DEPOLARIZE1", data_qubits, p_idle) # type: ignore
@@ -371,6 +361,8 @@ class SurfaceCode:
         # One-shot stabilizer projection
         self.circuit += loop_body
         
+        self.circuit.append("X", [8]) # type: ignore
+
         t = dt # "time index"
 
         
@@ -378,8 +370,8 @@ class SurfaceCode:
             # Shift coordinates 
             self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])  # type: ignore
 
-            if depolarize_prob > 0.0:
-                self.circuit.append("DEPOLARIZE1", data_indices, depolarize_prob)  # type: ignore
+            # if depolarize_prob > 0.0:
+            #     self.circuit.append("DEPOLARIZE1", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("X_ERROR", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("Y_ERROR", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("Z_ERROR", data_indices, depolarize_prob)  # type: ignore
@@ -416,78 +408,68 @@ class SurfaceCode:
         logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
         self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
-    def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
-                        noise_params: Optional[Dict[str, float]] = None) -> None:
-            
-            if noise_params is None:
-                noise_params = {}
+    def build_in_stim_simple_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z",
+                                    p:float = 0.0) -> None:
+        
+        noise_params = {
+            "p_init": 2*p,
+            "p_gate1": p/10,
+            "p_gate2": p,
+            "p_meas": 2*p,
+            "p_idle": p/20}
 
-            # --- Qubit Coordinates Setup (Same as before) ---
-            for idx, (coord, _) in self.index_mapping.items():
-                self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
+        for idx, (coord, _) in self.index_mapping.items():
+            self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
 
-            data_indices = self.get_data_qubits(_as="idx")
-            dt = len(self.stab_indices)
+        data_indices = self.get_data_qubits(_as="idx")
+        dt = len(self.stab_indices)
 
-            # --- Logical State Prep ---
-            # Note: We apply errors to these initial operations too if desired
-            p_init = noise_params.get("p_init", 0.0)
-            p_gate1 = noise_params.get("p_gate1", 0.0)
+        p_init = noise_params.get("p_init")
 
-            self.circuit.append("R", data_indices)  # type: ignore
-            if p_init > 0: 
-                self.circuit.append("X_ERROR", data_indices, p_init)  # type: ignore
+        self.circuit.append("R", data_indices)  # type: ignore
+        if p_init > 0:  # type: ignore
+            self.circuit.append("X_ERROR", data_indices, p_init)  # type: ignore
 
-            if logical_basis == "X":
-                self.circuit.append("H", data_indices)  # type: ignore
-                if p_gate1 > 0: 
-                    self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)  # type: ignore
-            
-            self.circuit.append("TICK")  # type: ignore
-            
-            # --- Rounds Loop ---
-            # Generate the loop body ONCE with noise parameters baked in
-            loop_body_circuit = self.loop_body_noisy(noise_params)
-            
-            # Add initial round
+        if logical_basis == "X":
+            self.circuit.append("H", data_indices)  # type: ignore
+
+        self.circuit.append("TICK")  # type: ignore
+        
+        loop_body_circuit = self.loop_body_noisy(noise_params={})
+        self.circuit += loop_body_circuit
+
+        loop_body_circuit = self.loop_body_noisy(noise_params)
+
+        t = dt 
+        for rnd in range(1, rounds):
+            self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
             self.circuit += loop_body_circuit
 
-            t = dt 
-            
-            # Subsequent rounds
-            for rnd in range(1, rounds):
-                self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
-                self.circuit += loop_body_circuit
+            prev = t - dt
+            curr = t
+            for j, anc in enumerate(self.stab_indices):
+                coord, _ = self.index_mapping[anc]
+                lookback_prev = (prev+j) - (t+dt)
+                lookback_curr = (curr+j) - (t+dt)
+                self.circuit.append(
+                    "DETECTOR",
+                    [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
+                    [coord[0], coord[1], rnd]
+                )
+            t += dt
 
-                # Detector declaration (Same as before)
-                prev = t - dt
-                curr = t
-                for j, anc in enumerate(self.stab_indices):
-                    coord, _ = self.index_mapping[anc]
-                    lookback_prev = (prev+j) - (t+dt)
-                    lookback_curr = (curr+j) - (t+dt)
-                    self.circuit.append(
-                        "DETECTOR",
-                        [stim.target_rec(lookback_prev), stim.target_rec(lookback_curr)],
-                        [coord[0], coord[1], rnd]
-                    )
-                t += dt
+        p_meas = noise_params.get("p_meas", 0.0)
+        
+        if logical_basis == "X":
+            self.circuit.append("H", data_indices)  # type: ignore
 
-            # --- Logical Measurement ---
-            p_meas = noise_params.get("p_meas", 0.0)
+        if p_meas > 0:
+            self.circuit.append("X_ERROR", data_indices, p_meas)  # type: ignore
             
-            if logical_basis == "X":
-                self.circuit.append("H", data_indices)  # type: ignore
-                if p_gate1 > 0: 
-                    self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)  # type: ignore
-
-            if p_meas > 0:
-                self.circuit.append("X_ERROR", data_indices, p_meas)  # type: ignore
-                
-            self.circuit.append("M", data_indices)  # type: ignore
-            
-            logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
-            self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
+        self.circuit.append("M", data_indices)  # type: ignore
+        
+        logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
+        self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
     def build_in_stim_noisy2(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
                                 noise_params: Optional[Dict[str, float]] = None) -> None:
@@ -587,14 +569,14 @@ class SurfaceCode:
             logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
             self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
-    def run_with_pymatching(self, shots: int = 1000):
+    def run_with_pymatching(self, shots: int = 1000, so: bool = True):
         model = self.circuit.detector_error_model(decompose_errors=True)
         matching = pm.Matching.from_detector_error_model(model)
         sampler = self.circuit.compile_detector_sampler()
 
         syndrome, obs = sampler.sample(
             shots=shots,
-            separate_observables=True
+            separate_observables=so
         )
 
         preds = matching.decode_batch(syndrome)
@@ -602,6 +584,7 @@ class SurfaceCode:
         # logical error happens when observable prediction != actual
         errors = np.any(preds != obs, axis=1)
         logical_error_rate = np.mean(errors)
+        logical_error_rate = np.mean(preds != obs, axis=(0,1))
 
         return logical_error_rate, syndrome, obs, preds
 
@@ -615,7 +598,8 @@ class SurfaceCode:
  
     def diagram(self, *args, **kwargs) -> None:
         """Prints a text diagram of the circuit."""
-        print(self.circuit.diagram(*args, **kwargs))
+        # print(self.circuit.diagram(*args, **kwargs))
+        return self.circuit.diagram(*args, **kwargs)
 
     def visualize_results(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
                           x_err: List[Union[int, Tuple[float, float]]] = [], 
@@ -660,7 +644,7 @@ class SurfaceCode:
         if len(result) != (len(x_indices) + len(z_indices)):
             raise ValueError(f"Result length {len(result)} does not match number of stabilizers.")
 
-        def plot_stabilizer_patch(coord, neighbors, qtype, val):
+        def plot_stabilizer_patch(coord, neighbors, qtype, val, show_edges=True):
             color = colors[qtype][val]
             cx, cy = coord
             
@@ -726,6 +710,28 @@ class SurfaceCode:
                 elif isinstance(e, tuple):
                      coords.add(e)
             return coords
+
+        # qubit_coords_to_plot = self.qubit_coords
+        # if not show_edges:
+        #     qubit_coords_to_plot = [c for c in self.qubit_coords if 0 < c[0] < self.d - 1 and 0 < c[1] < self.d - 1]
+
+        # data_x = [c[0] for c in qubit_coords_to_plot]
+        # data_y = [c[1] for c in qubit_coords_to_plot]
+        
+        # data_colors = []
+        # for coord in qubit_coords_to_plot:
+        #     has_x = coord in x_error_coords
+        #     has_z = coord in z_error_coords
+            
+        #     if has_x and has_z:
+        #         data_colors.append('cyan')
+        #     elif has_x:
+        #         data_colors.append('gold')
+        #     elif has_z:
+        #         data_colors.append('palegreen')
+        #     else:
+        #         data_colors.append('#F0F0F0')
+
         x_error_coords = to_coords(x_err)
         z_error_coords = to_coords(z_err)
 
@@ -802,6 +808,206 @@ class SurfaceCode:
         plt.tight_layout()
         plt.show()
         
+
+    def visualize_results2(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
+                          x_err: List[Union[int, Tuple[float, float]]] = [], 
+                          z_err: List[Union[int, Tuple[float, float]]] = [],
+                          show_edges=True) -> None:
+        """ 
+        adapted from github/jfoliveira/surfq
+        Visualize the measurement results on the surface code.
+        Plots data qubits as circles and colors the plaquettes (stabilizers)
+        based on the measurement outcome (Syndrome vs Normal).
+        results: Array of measurement (list of bools or 0/1) for all stabilizers.
+        show_ancillas: If True, shows ancilla qubits as squares on the plot.
+        """
+        if result is None:
+            result = self.get_syndrome(x_errors=x_err, z_errors=z_err)
+        
+        sns.set_style("darkgrid")
+        mpl.rcParams.update(  
+            {
+                "font.size": 12,
+                "grid.color": "0.5",
+                "grid.linestyle": "--",
+                "grid.linewidth": 0.6,
+                "xtick.color": "black",
+                "ytick.color": "black",
+            }
+        )
+        
+        colors = {
+            'X_stab': {0: "#79ABD4", 1: "#F07084"},  # Muted Blue vs Muted Red
+            'Z_stab': {0: "#385B8B", 1: "#9D212F"}   # Darker Blue vs Lighter Red
+        }
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        
+        # Split into X and Z based on the correct ordering
+        x_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
+        z_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
+        # Now match the result array exactly
+        x_results = result[:len(x_indices)]
+        z_results = result[len(x_indices):]
+
+        if len(result) != (len(x_indices) + len(z_indices)):
+            raise ValueError(f"Result length {len(result)} does not match number of stabilizers.")
+
+        def plot_stabilizer_patch(coord, neighbors, qtype, val, show_edges=True):
+            color = colors[qtype][val]
+            cx, cy = coord
+            
+            # Sort neighbors angularly around the center to ensure correct polygon drawing
+            neighbors = sorted(neighbors, key=lambda p: np.arctan2(p[1] - cy, p[0] - cx))
+            
+            if len(neighbors) == 4:
+                # Bulk Stabilizer -> Polygon
+                poly = Polygon(neighbors, facecolor=color, edgecolor='black', alpha=0.9, linewidth=1)
+                ax.add_patch(poly)
+            
+            elif len(neighbors) == 2 and show_edges:
+                # Boundary Stabilizer -> wedge (half circle)
+                shift_x = 0
+                shift_y = 0
+                L = self.d 
+                
+                # Determine inward shift based on the coordinate being outside the grid [0, L-1]
+                # Left edge: cx = -0.5 (shift +0.5)
+                if cx < 0:
+                    shift_x = 0.5
+                # Right edge: cx = L - 0.5 (shift -0.5)
+                elif cx > L - 1:
+                    shift_x = -0.5
+                
+                # Top edge: cy = -0.5 (shift +0.5)
+                if cy < 0:
+                    shift_y = 0.5
+                # Bottom edge: cy = L - 0.5 (shift -0.5)
+                elif cy > L - 1:
+                    shift_y = -0.5
+                
+                shifted_cx = cx + shift_x # Line where cx is shifted
+                shifted_cy = cy + shift_y # Line where cy is shifted
+                # Vector from original center (cx, cy) to midpoint of neighbors (mx, my)
+                mx, my = (neighbors[0][0] + neighbors[1][0])/2, (neighbors[0][1] + neighbors[1][1])/2
+                vec_x, vec_y = mx - cx, my - cy
+                pointing_angle = np.degrees(np.arctan2(vec_y, vec_x))
+                pointing_angle = (pointing_angle + 180) % 360
+                theta1 = pointing_angle - 90
+                theta2 = pointing_angle + 90
+                
+                wedge = Wedge((shifted_cx, shifted_cy), r=0.5, theta1=theta1, theta2=theta2, 
+                              facecolor=color, edgecolor='black', alpha=0.9, linewidth=1)
+                ax.add_patch(wedge)
+
+        for i, idx in enumerate(x_indices):
+            coord, qtype = self.index_mapping[idx]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            plot_stabilizer_patch(coord, neighbors, qtype, x_results[i], show_edges)
+
+        for i, idx in enumerate(z_indices):
+            coord, qtype = self.index_mapping[idx]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            plot_stabilizer_patch(coord, neighbors, qtype, z_results[i], show_edges)
+
+        def to_coords(errors):
+            coords = set()
+            for e in errors:
+                if isinstance(e, int):
+                    if e in self.index_mapping:
+                        coords.add(self.index_mapping[e][0])
+                elif isinstance(e, tuple):
+                     coords.add(e)
+            return coords
+        x_error_coords = to_coords(x_err)
+        z_error_coords = to_coords(z_err)
+
+        data_x = [c[0] for c in self.qubit_coords]
+        data_y = [c[1] for c in self.qubit_coords]
+        
+        data_colors = []
+        for coord in self.qubit_coords:
+            has_x = coord in x_error_coords
+            has_z = coord in z_error_coords
+            
+            if has_x and has_z:
+                data_colors.append('cyan')
+            elif has_x:
+                data_colors.append('gold')
+            elif has_z:
+                data_colors.append('palegreen')
+            else:
+                data_colors.append('#F0F0F0')
+
+        ax.scatter(data_x, data_y, s=200, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
+
+        if show_ancillas:
+            x_stabilisers_coords_to_plot = self.x_stabilisers_coords
+            z_stabilisers_coords_to_plot = self.z_stabilisers_coords
+            if not show_edges:
+                x_stabilisers_coords_to_plot = [c for c in self.x_stabilisers_coords if 0 < c[0] < self.d - 1 and 0 < c[1] < self.d - 1]
+                z_stabilisers_coords_to_plot = [c for c in self.z_stabilisers_coords if 0 < c[0] < self.d - 1 and 0 < c[1] < self.d - 1]
+
+            x_stab_x = [coord[0] for coord in x_stabilisers_coords_to_plot]
+            x_stab_y = [coord[1] for coord in x_stabilisers_coords_to_plot]
+            z_stab_x = [coord[0] for coord in z_stabilisers_coords_to_plot]
+            z_stab_y = [coord[1] for coord in z_stabilisers_coords_to_plot]
+
+            ax.scatter(x_stab_x, x_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='X Ancilla', zorder=11)
+            ax.scatter(z_stab_x, z_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='Z Ancilla', zorder=11)
+
+        if show_index:
+            for index, (coord, qtype) in self.index_mapping.items():
+                if not show_edges:
+                    x, y = coord
+                    is_edge = not (0 < x < self.d - 1 and 0 < y < self.d - 1)
+                    if is_edge:
+                        continue
+                # Determine text color for visibility
+                if qtype == 'data':
+                    t_color = 'black'
+                else:
+                    t_color = 'black' if show_ancillas else 'white'
+                    
+                ax.text(coord[0]+0.005, coord[1], str(index), color=t_color, 
+                        fontsize=8, ha='center', va='center', zorder=12)
+
+        ax.set_aspect('equal')
+        ax.set_xticks(range(self.d))
+        ax.set_yticks(range(self.d))
+        ax.set_xlim(-1, self.d)
+        ax.set_ylim(-1, self.d)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        # ax.tick_params(axis='x', which='both', bottom=False, top=False)
+        # ax.tick_params(axis='y', which='both', bottom=False, top=False)
+        
+        # ax.set_title(f"Syndrome Measurement (d={self.d})")
+        
+        legend_elements = [
+            Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
+            Patch(facecolor=colors['X_stab'][1], edgecolor='k', label='X-Syndrome (Error)'),
+            Patch(facecolor=colors['Z_stab'][0], edgecolor='k', label='Z-Stab (Ok)'),
+            Patch(facecolor=colors['Z_stab'][1], edgecolor='k', label='Z-Syndrome (Error)'),
+            Line2D([0], [0], marker='o', color='w', label='Data Qubit (No Error)',
+                          markerfacecolor='#F0F0F0', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Ancilla Qubit',
+                          markerfacecolor='silver', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='X Error (On Data)',
+                          markerfacecolor='gold', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Z Error (On Data)',
+                          markerfacecolor='palegreen', markersize=10, markeredgecolor='k'),
+            Line2D([0], [0], marker='o', color='w', label='Y Error (On Data)',
+                          markerfacecolor='cyan', markersize=10, markeredgecolor='k'),
+            
+        ]
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
+        
+        plt.tight_layout()
+        plt.show()
+    
+
+
     def is_valid_coordinate(self, coord: Tuple[int|float, int|float]) -> bool:
         """ Check if the given coordinate is valid within the surface code. """
         x, y = coord
