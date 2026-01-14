@@ -808,7 +808,6 @@ class SurfaceCode:
         plt.tight_layout()
         plt.show()
         
-
     def visualize_results2(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
                           x_err: List[Union[int, Tuple[float, float]]] = [], 
                           z_err: List[Union[int, Tuple[float, float]]] = [],
@@ -1006,8 +1005,6 @@ class SurfaceCode:
         plt.tight_layout()
         plt.show()
     
-
-
     def is_valid_coordinate(self, coord: Tuple[int|float, int|float]) -> bool:
         """ Check if the given coordinate is valid within the surface code. """
         x, y = coord
