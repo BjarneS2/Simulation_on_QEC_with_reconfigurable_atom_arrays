@@ -333,7 +333,8 @@ class SurfaceCode:
             loop.append("TICK") # type: ignore
             return loop
 
-    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob:float=0.0) -> None:
+    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob:float=0.0,
+                      inject_X_pos:int = 8, injection:bool=False) -> None:
         """ First implementation version; Idealized, noiseless rotated surface code circuit in stim"""
 
         for idx, (coord, _) in self.index_mapping.items():
@@ -356,7 +357,8 @@ class SurfaceCode:
         loop_body = self.loop_body(depolarize_prob=depolarize_prob)
         self.circuit += loop_body
         
-        self.circuit.append("X", [8]) # type: ignore
+        if injection:
+            self.circuit.append("X", [inject_X_pos]) # type: ignore
 
         t = dt # "time index"
 
@@ -401,7 +403,8 @@ class SurfaceCode:
 
     def build_in_stim_simple_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z",
                                     p:float = 0.0) -> None:
-        """simple noise model with fixed error probabilities given p"""
+        """simple noise model with fixed error probabilities given p
+           sadly this is not working as expected yet, further debugging is needed."""
         
         noise_params = {
             "p_init": 2*p,
@@ -454,7 +457,6 @@ class SurfaceCode:
         
         if logical_basis == "X":
             self.circuit.append("H", data_indices)  # type: ignore
-
         if p_meas > 0:
             self.circuit.append("X_ERROR", data_indices, p_meas)  # type: ignore
             
@@ -465,30 +467,34 @@ class SurfaceCode:
 
     def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
                                 noise_params: Optional[Dict[str, float]] = None) -> None:
+            """This is supposed to be the most general version with customizable noise parameters
+                Sadly this is not working as expected yet, so further debugging is needed"""
             
-            if noise_params is None: noise_params = {}
+            if noise_params is None: 
+                noise_params = {}
             
-            # [Coordinates setup ... same as before]
             for idx, (coord, _) in self.index_mapping.items():
                 self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
 
             data_indices = self.get_data_qubits(_as="idx")
-            # Map data qubit indices to their position in the measurement array for easier lookup later
             data_idx_to_meas_offset = {idx: i for i, idx in enumerate(data_indices)}
             
             dt = len(self.stab_indices)
 
-            # [Logical State Prep ... same as before]
             p_init = noise_params.get("p_init", 0.0)
             p_gate1 = noise_params.get("p_gate1", 0.0)
-            self.circuit.append("R", data_indices)
-            if p_init > 0: self.circuit.append("X_ERROR", data_indices, p_init)
-            if logical_basis == "X":
-                self.circuit.append("H", data_indices)
-                if p_gate1 > 0: self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)
-            self.circuit.append("TICK")
+            self.circuit.append("R", data_indices) # type: ignore
             
-            # [Rounds Loop ... same as before]
+            if p_init > 0: 
+                self.circuit.append("X_ERROR", data_indices, p_init) # type: ignore
+            
+            if logical_basis == "X":
+                self.circuit.append("H", data_indices) # type: ignore
+                if p_gate1 > 0: 
+                    self.circuit.append("DEPOLARIZE1", data_indices, p_gate1) # type: ignore
+            
+            self.circuit.append("TICK") # type: ignore
+            
             loop_body_circuit = self.loop_body_noisy(noise_params)
             self.circuit += loop_body_circuit # Round 0
             t = dt 
@@ -496,8 +502,7 @@ class SurfaceCode:
             for rnd in range(1, rounds):
                 self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])
                 self.circuit += loop_body_circuit
-                
-                # Bulk Detectors (Comparing Ancilla t vs Ancilla t-1)
+    
                 prev = t - dt
                 curr = t
                 for j, anc in enumerate(self.stab_indices):
@@ -515,49 +520,31 @@ class SurfaceCode:
             
             # 1. Measure Data Qubits
             if logical_basis == "X":
-                self.circuit.append("H", data_indices)
-                if p_gate1 > 0: self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)
+                self.circuit.append("H", data_indices) # type: ignore
+                if p_gate1 > 0: self.circuit.append("DEPOLARIZE1", data_indices, p_gate1)  # type: ignore
 
             if p_meas > 0:
-                self.circuit.append("X_ERROR", data_indices, p_meas)
+                self.circuit.append("X_ERROR", data_indices, p_meas)  # type: ignore
                 
-            self.circuit.append("M", data_indices)
-
-            # 2. Add "End of Time" Detectors
-            # We need to compare the LAST ancilla measurement to the stabilizers 
-            # reconstructed from the data measurements.
+            self.circuit.append("M", data_indices) # type: ignore
             
-            # Number of measurements in the final block (all data qubits)
             num_data_meas = len(data_indices)
-            
-            # Determine which stabilizer type we can reconstruct (Z-stabs if measured in Z, X-stabs if X)
             relevant_stab_type = "Z_stab" if logical_basis == "Z" else "X_stab"
 
             for j, anc in enumerate(self.stab_indices):
                 coord, qtype = self.index_mapping[anc]
-                
-                # Only add detectors for the stabilizers compatible with the measurement basis
                 if qtype == relevant_stab_type:
-                    
-                    # Get the record index of the last ancilla measurement for this stabilizer
-                    # The ancilla measurements happened before the data measurements
-                    # So we look back past the data measurements (num_data_meas) to the ancilla block
-                    ancilla_lookback = j - dt - num_data_meas 
-                    
-                    # Construct the "pseudo-stabilizer" from data measurements
-                    # This involves XORing the measurements of the data qubits involved in this stabilizer
+                    ancilla_lookback = j - dt - num_data_meas
                     neighbors = self.get_surrounding_data_qubits(coord)
                     rec_targets = [stim.target_rec(ancilla_lookback)]
                     
                     for n_coord in neighbors:
                         n_idx = self.inverse_mapping[n_coord]
-                        # Find where this data qubit is in the measurement record (0 to -num_data_meas)
                         meas_offset = data_idx_to_meas_offset[n_idx] - num_data_meas
                         rec_targets.append(stim.target_rec(meas_offset))
                     
                     self.circuit.append("DETECTOR", rec_targets, [coord[0], coord[1], rounds])
 
-            # 3. Logical Observable (Same as before)
             logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
             self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
@@ -572,245 +559,99 @@ class SurfaceCode:
         )
 
         preds = matching.decode_batch(syndrome)
-
-        # logical error happens when observable prediction != actual
         errors = np.any(preds != obs, axis=1)
         logical_error_rate = np.mean(errors)
-        logical_error_rate = np.mean(preds != obs, axis=(0,1))
-
+        
+        # axis 0: shots, axis 1: observables <- num of logical qubits, 
+        # I will just average over both for now, still hasn't worked so 
+        # doesn't really matter either way:
+        logical_error_rate = np.mean(preds != obs, axis=(0,1)) 
         return logical_error_rate, syndrome, obs, preds
 
-    def run_simulation(self, circuit: Optional[stim.Circuit] = None, shots: int = 1000) -> np.ndarray:
-        if circuit is not None:
-            sampler = circuit.compile_sampler()
-        else:
-            sampler = self.circuit.compile_sampler()
+    def run_simulation(self, shots: int = 1000) -> np.ndarray:
+        if self.circuit is None:
+            raise ValueError("Circuit has not been built yet.")
+        sampler = self.circuit.compile_sampler()
         results = sampler.sample(shots=shots)
         return results
  
-    def diagram(self, *args, **kwargs) -> None:
+    def diagram(self, printf:bool = False, *args, **kwargs) -> None:
         """Prints a text diagram of the circuit."""
-        # print(self.circuit.diagram(*args, **kwargs))
+        if printf:
+            print(self.circuit.diagram(*args, **kwargs))
         return self.circuit.diagram(*args, **kwargs)
-
-    def visualize_results(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
-                          x_err: List[Union[int, Tuple[float, float]]] = [], 
-                          z_err: List[Union[int, Tuple[float, float]]] = []) -> None:
-        """ 
-        adapted from github/jfoliveira/surfq
-        Visualize the measurement results on the surface code.
-        Plots data qubits as circles and colors the plaquettes (stabilizers)
-        based on the measurement outcome (Syndrome vs Normal).
-        results: Array of measurement (list of bools or 0/1) for all stabilizers.
-        show_ancillas: If True, shows ancilla qubits as squares on the plot.
+         
+    def get_syndrome(self, x_errors: List[Union[int, Tuple[float, float]]] = [], z_errors: List[Union[int, Tuple[float, float]]] = []) -> np.ndarray:
         """
-        if result is None:
-            result = self.get_syndrome(x_errors=x_err, z_errors=z_err)
+        Calculate the syndrome given lists of X and Z errors on data qubits.
+        X errors are detected by Z stabilizers.
+        Z errors are detected by X stabilizers.
         
-        sns.set_style("darkgrid")
-        mpl.rcParams.update(  
-            {
-                "font.size": 12,
-                "grid.color": "0.5",
-                "grid.linestyle": "--",
-                "grid.linewidth": 0.6,
-                "xtick.color": "black",
-                "ytick.color": "black",
-            }
-        )
+        The returned syndrome follows the order:
+        1. All X-stabilizers (sorted as in stab_indices)
+        2. All Z-stabilizers (sorted as in stab_indices)
+        This matches the expectation of visualize_results.
+        """
         
-        colors = {
-            'X_stab': {0: "#79ABD4", 1: "#F07084"},  # Muted Blue vs Muted Red
-            'Z_stab': {0: "#385B8B", 1: "#9D212F"}   # Darker Blue vs Lighter Red
-        }
-
-        fig, ax = plt.subplots(figsize=(8, 8))
-        
-        # Split into X and Z based on the correct ordering
-        x_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
-        z_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
-        # Now match the result array exactly
-        x_results = result[:len(x_indices)]
-        z_results = result[len(x_indices):]
-
-        if len(result) != (len(x_indices) + len(z_indices)):
-            raise ValueError(f"Result length {len(result)} does not match number of stabilizers.")
-
-        def plot_stabilizer_patch(coord, neighbors, qtype, val, show_edges=True):
-            color = colors[qtype][val]
-            cx, cy = coord
-            
-            # Sort neighbors angularly around the center to ensure correct polygon drawing
-            neighbors = sorted(neighbors, key=lambda p: np.arctan2(p[1] - cy, p[0] - cx))
-            
-            if len(neighbors) == 4:
-                # Bulk Stabilizer -> Polygon
-                poly = Polygon(neighbors, facecolor=color, edgecolor='black', alpha=0.9, linewidth=1)
-                ax.add_patch(poly)
-            
-            elif len(neighbors) == 2:
-                # Boundary Stabilizer -> wedge (half circle)
-                shift_x = 0
-                shift_y = 0
-                L = self.d 
-                
-                # Determine inward shift based on the coordinate being outside the grid [0, L-1]
-                # Left edge: cx = -0.5 (shift +0.5)
-                if cx < 0:
-                    shift_x = 0.5
-                # Right edge: cx = L - 0.5 (shift -0.5)
-                elif cx > L - 1:
-                    shift_x = -0.5
-                
-                # Top edge: cy = -0.5 (shift +0.5)
-                if cy < 0:
-                    shift_y = 0.5
-                # Bottom edge: cy = L - 0.5 (shift -0.5)
-                elif cy > L - 1:
-                    shift_y = -0.5
-                
-                shifted_cx = cx + shift_x # Line where cx is shifted
-                shifted_cy = cy + shift_y # Line where cy is shifted
-                # Vector from original center (cx, cy) to midpoint of neighbors (mx, my)
-                mx, my = (neighbors[0][0] + neighbors[1][0])/2, (neighbors[0][1] + neighbors[1][1])/2
-                vec_x, vec_y = mx - cx, my - cy
-                pointing_angle = np.degrees(np.arctan2(vec_y, vec_x))
-                pointing_angle = (pointing_angle + 180) % 360
-                theta1 = pointing_angle - 90
-                theta2 = pointing_angle + 90
-                
-                wedge = Wedge((shifted_cx, shifted_cy), r=0.5, theta1=theta1, theta2=theta2, 
-                              facecolor=color, edgecolor='black', alpha=0.9, linewidth=1)
-                ax.add_patch(wedge)
-
-        for i, idx in enumerate(x_indices):
-            coord, qtype = self.index_mapping[idx]
-            neighbors = self.get_surrounding_data_qubits(coord)
-            plot_stabilizer_patch(coord, neighbors, qtype, x_results[i])
-
-        for i, idx in enumerate(z_indices):
-            coord, qtype = self.index_mapping[idx]
-            neighbors = self.get_surrounding_data_qubits(coord)
-            plot_stabilizer_patch(coord, neighbors, qtype, z_results[i])
-
+        # Helper to ensure we work with coordinates
         def to_coords(errors):
             coords = set()
             for e in errors:
                 if isinstance(e, int):
+                    # verify valid index
                     if e in self.index_mapping:
                         coords.add(self.index_mapping[e][0])
                 elif isinstance(e, tuple):
                      coords.add(e)
             return coords
 
-        # qubit_coords_to_plot = self.qubit_coords
-        # if not show_edges:
-        #     qubit_coords_to_plot = [c for c in self.qubit_coords if 0 < c[0] < self.d - 1 and 0 < c[1] < self.d - 1]
+        x_error_coords = to_coords(x_errors)
+        z_error_coords = to_coords(z_errors)
 
-        # data_x = [c[0] for c in qubit_coords_to_plot]
-        # data_y = [c[1] for c in qubit_coords_to_plot]
+        # Split into X and Z based on the correct ordering
+        x_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
+        z_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
         
-        # data_colors = []
-        # for coord in qubit_coords_to_plot:
-        #     has_x = coord in x_error_coords
-        #     has_z = coord in z_error_coords
-            
-        #     if has_x and has_z:
-        #         data_colors.append('cyan')
-        #     elif has_x:
-        #         data_colors.append('gold')
-        #     elif has_z:
-        #         data_colors.append('palegreen')
-        #     else:
-        #         data_colors.append('#F0F0F0')
+        syndrome = []
 
-        x_error_coords = to_coords(x_err)
-        z_error_coords = to_coords(z_err)
+        # 1. X Stabilizers (detect Z errors)
+        for anc in x_stab_indices:
+            coord, _ = self.index_mapping[anc]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            # Check parity of Z errors on neighbors
+            parity = 0
+            for n_coord in neighbors:
+                if n_coord in z_error_coords:
+                    parity += 1
+            syndrome.append(parity % 2)
 
-        data_x = [c[0] for c in self.qubit_coords]
-        data_y = [c[1] for c in self.qubit_coords]
-        
-        data_colors = []
-        for coord in self.qubit_coords:
-            has_x = coord in x_error_coords
-            has_z = coord in z_error_coords
-            
-            if has_x and has_z:
-                data_colors.append('cyan')
-            elif has_x:
-                data_colors.append('gold')
-            elif has_z:
-                data_colors.append('palegreen')
-            else:
-                data_colors.append('#F0F0F0')
+        # 2. Z Stabilizers (detect X errors)
+        for anc in z_stab_indices:
+            coord, _ = self.index_mapping[anc]
+            neighbors = self.get_surrounding_data_qubits(coord)
+            # Check parity of X errors on neighbors
+            parity = 0
+            for n_coord in neighbors:
+                if n_coord in x_error_coords:
+                    parity += 1
+            syndrome.append(parity % 2)
 
-        ax.scatter(data_x, data_y, s=200, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
+        return np.array(syndrome, dtype=int)
 
-        if show_ancillas:
-            x_stab_x = [coord[0] for coord in self.x_stabilisers_coords]
-            x_stab_y = [coord[1] for coord in self.x_stabilisers_coords]
-            z_stab_x = [coord[0] for coord in self.z_stabilisers_coords]
-            z_stab_y = [coord[1] for coord in self.z_stabilisers_coords]
-
-            ax.scatter(x_stab_x, x_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='X Ancilla', zorder=11)
-            ax.scatter(z_stab_x, z_stab_y, marker='o', s=150, color='silver', edgecolor="black", label='Z Ancilla', zorder=11)
-
-        if show_index:
-            for index, (coord, qtype) in self.index_mapping.items():
-                # Determine text color for visibility
-                if qtype == 'data':
-                    t_color = 'black'
-                else:
-                    t_color = 'black' if show_ancillas else 'white'
-                    
-                ax.text(coord[0]+0.005, coord[1], str(index), color=t_color, 
-                        fontsize=8, ha='center', va='center', zorder=12)
-
-        ax.set_aspect('equal')
-        ax.set_xticks(range(self.d))
-        ax.set_yticks(range(self.d))
-        ax.set_xlim(-1, self.d)
-        ax.set_ylim(-1, self.d)
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-        # ax.tick_params(axis='x', which='both', bottom=False, top=False)
-        # ax.tick_params(axis='y', which='both', bottom=False, top=False)
-        
-        # ax.set_title(f"Syndrome Measurement (d={self.d})")
-        
-        legend_elements = [
-            Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
-            Patch(facecolor=colors['X_stab'][1], edgecolor='k', label='X-Syndrome (Error)'),
-            Patch(facecolor=colors['Z_stab'][0], edgecolor='k', label='Z-Stab (Ok)'),
-            Patch(facecolor=colors['Z_stab'][1], edgecolor='k', label='Z-Syndrome (Error)'),
-            Line2D([0], [0], marker='o', color='w', label='Data Qubit (No Error)',
-                          markerfacecolor='#F0F0F0', markersize=10, markeredgecolor='k'),
-            Line2D([0], [0], marker='o', color='w', label='Ancilla Qubit',
-                          markerfacecolor='silver', markersize=10, markeredgecolor='k'),
-            Line2D([0], [0], marker='o', color='w', label='X Error (On Data)',
-                          markerfacecolor='gold', markersize=10, markeredgecolor='k'),
-            Line2D([0], [0], marker='o', color='w', label='Z Error (On Data)',
-                          markerfacecolor='palegreen', markersize=10, markeredgecolor='k'),
-            Line2D([0], [0], marker='o', color='w', label='Y Error (On Data)',
-                          markerfacecolor='cyan', markersize=10, markeredgecolor='k'),
-            
-        ]
-        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
-        
-        plt.tight_layout()
-        plt.show()
-        
-    def visualize_results2(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, show_index: bool = False, 
+    def visualize_results(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, 
+                          show_index: bool = False, show_edges: bool = True, 
                           x_err: List[Union[int, Tuple[float, float]]] = [], 
-                          z_err: List[Union[int, Tuple[float, float]]] = [],
-                          show_edges=True) -> None:
+                          z_err: List[Union[int, Tuple[float, float]]] = []) -> None:
         """ 
-        adapted from github/jfoliveira/surfq
+        Inspired by the visualization in: github/jfoliveira/surfq
         Visualize the measurement results on the surface code.
         Plots data qubits as circles and colors the plaquettes (stabilizers)
         based on the measurement outcome (Syndrome vs Normal).
         results: Array of measurement (list of bools or 0/1) for all stabilizers.
         show_ancillas: If True, shows ancilla qubits as squares on the plot.
+        show_index: If True, shows the index of each qubit on the plot.
+        show_edges: If True, shows boundary stabilizers as wedges.
+        x_err, z_err: Lists of qubit indices or coordinates where X or Z errors are injected.
         """
         if result is None:
             result = self.get_syndrome(x_errors=x_err, z_errors=z_err)
@@ -972,8 +813,7 @@ class SurfaceCode:
         ax.set_yticklabels([])
         # ax.tick_params(axis='x', which='both', bottom=False, top=False)
         # ax.tick_params(axis='y', which='both', bottom=False, top=False)
-        
-        # ax.set_title(f"Syndrome Measurement (d={self.d})")
+
         
         legend_elements = [
             Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
@@ -993,10 +833,14 @@ class SurfaceCode:
             
         ]
         ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
-        
+        # ax.set_title(f"Syndrome Measurement (d={self.d})")
         plt.tight_layout()
         plt.show()
     
+    
+    """ Here on out is still unfinished code and ideas for future implementation """
+
+
     def is_valid_coordinate(self, coord: Tuple[int|float, int|float]) -> bool:
         """ Check if the given coordinate is valid within the surface code. """
         x, y = coord
@@ -1050,9 +894,9 @@ class SurfaceCode:
 
         return False
 
-    def parse_instructions_new(self, instructions: List[Dict[str, Any]]):
+    def parse_instructions(self, instructions: List[Dict[str, Any]]):
             """
-            Used Like this:
+            My idea was to have a method that can parse a list of instructions like this:
             SurfaceCode.parse_instructions([
                 {'operation': 'H', 'qubits': [(1,2), (3,4)]},
                 {'operation': 'CNOT', 'qubits': [((1,2), (3,4)), ((5,6), (7,8))]},
@@ -1081,12 +925,15 @@ class SurfaceCode:
             ])
             
             This should make it possible to insert errors in the circuit after
-            initialization, before measurement, and during operations. I also want
+            initialization, before measurement, and during operations. I also wanted
             to be able to make it recognize if error values are given multiple times
             for the same qubit and operation, in which case it is overwritten with the
-            last given value. I also want to make sure that the probabilities are 
-            between 0 and 1. if the instructions are given as 
+            last given value (so not like the errors are given for specific times or executions 
+            in the code but rather for general error for operations and specific qubits). 
+            I also want to make sure that the probabilities are between 0 and 1. 
+            if the instructions are given as :
             [{'what instruction': 'type of gate', 'qubits': list|str, probability: float},...]
+
             then the instructions should be literals: 
                     - operation, operation_error, measurement_error, initialization_error
             for the type of gate it should be literals:
@@ -1105,6 +952,7 @@ class SurfaceCode:
             the indices of the qubits from their coordinates and vice versa.
             To get the list of all qubits I can use get_all_qubits(_as="idx"|"coord")
 
+            The method should do some error checking (TODO):
             should print a warning if error instruction has overridden a previous one.
             should print a warning if probability is out of bounds [0, 1] and skip it.
             should print a warning if qubit specification (out of surface code) is invalid and skip that instruction.
@@ -1117,7 +965,8 @@ class SurfaceCode:
             Of course I want to enable to apply these instructions one after another
             So if I wanna do e.g.: H as logical gate (all data qubits), then apply errors,
             then do CNOTs between data and ancillas, then apply more errors, 
-            then measure ancillas with potential measurement errors, I should be able to do so.
+            then measure ancillas with potential measurement errors, I should be able to do so
+            in the final implementation.
             So the instructions should be stored in a list of dictionaries, where each dictionary
             represents a single instruction or errors at a specific point in the circuit. 
             
@@ -1125,21 +974,22 @@ class SurfaceCode:
             a certain operation, e.g. after every H, after every CNOT, ... Maybe I can do this
             by having a special key in the dictionary like 'after_operation': 'H' and then the error
             is applied after every H operation in the circuit. This would require parsing the circuit
-            and inserting the errors at the right places. This could be done in the build_in_stim method.
+            and inserting the errors at the right places. All of this could be done in the build_in_stim method.
 
-            0. Always reset all bits. 
+            0. Always reset all bits. (check instruction for initialization errors)
             1. go through the instructions list and apply the operations/errors.
-            2. do rounds of stabilizer measurements.
-            3. measure all ancillas at the end.
-            4. return the circuit.
-            5. run the simulation and get the results.
-            6. visualize the results on the surface code.
+            1. do rounds of stabilizer measurements.
+            2. measure all ancillas & data qubits at the end.
+            3. return the circuit.
+            4. run the simulation and get the results.
+            5. visualize the results on the surface code.
+
             For the full QEC cycle I would need to include as well:
-            (7. apply decoding algorithm to correct errors.
-            8. visualize the corrected results on the surface code.
-            9. Maybe enable how the error was found/corrected. Visualize
+            6. apply decoding algorithm to correct errors.
+            7. visualize the corrected results on the surface code.
+            8. Maybe enable how the error was found/corrected. Visualize
             the actual errors that occurred vs the detected ones and what corrected them.
-            10. Calculate the logical error rate over multiple shots.)
+            9. Calculate the logical error rate over multiple shots.
 
             """
 
@@ -1194,65 +1044,7 @@ class SurfaceCode:
     def get_instructions(self) -> List[Dict[str, Any]]:
         """ Returns the list of parsed instructions. """
         if hasattr(self, 'instructions'):
-            return deepcopy(self.instructions)
+            return deepcopy(self.instructions) # just to be safe for now
         else:
             return []
-        
-    def get_syndrome(self, x_errors: List[Union[int, Tuple[float, float]]] = [], z_errors: List[Union[int, Tuple[float, float]]] = []) -> np.ndarray:
-        """
-        Calculate the syndrome given lists of X and Z errors on data qubits.
-        X errors are detected by Z stabilizers.
-        Z errors are detected by X stabilizers.
-        
-        The returned syndrome follows the order:
-        1. All X-stabilizers (sorted as in stab_indices)
-        2. All Z-stabilizers (sorted as in stab_indices)
-        This matches the expectation of visualize_results.
-        """
-        
-        # Helper to ensure we work with coordinates
-        def to_coords(errors):
-            coords = set()
-            for e in errors:
-                if isinstance(e, int):
-                    # verify valid index
-                    if e in self.index_mapping:
-                        coords.add(self.index_mapping[e][0])
-                elif isinstance(e, tuple):
-                     coords.add(e)
-            return coords
-
-        x_error_coords = to_coords(x_errors)
-        z_error_coords = to_coords(z_errors)
-
-        # Split into X and Z based on the correct ordering
-        x_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'X_stab']
-        z_stab_indices = [anc for anc in self.stab_indices if self.index_mapping[anc][1] == 'Z_stab']
-        
-        syndrome = []
-
-        # 1. X Stabilizers (detect Z errors)
-        for anc in x_stab_indices:
-            coord, _ = self.index_mapping[anc]
-            neighbors = self.get_surrounding_data_qubits(coord)
-            # Check parity of Z errors on neighbors
-            parity = 0
-            for n_coord in neighbors:
-                if n_coord in z_error_coords:
-                    parity += 1
-            syndrome.append(parity % 2)
-
-        # 2. Z Stabilizers (detect X errors)
-        for anc in z_stab_indices:
-            coord, _ = self.index_mapping[anc]
-            neighbors = self.get_surrounding_data_qubits(coord)
-            # Check parity of X errors on neighbors
-            parity = 0
-            for n_coord in neighbors:
-                if n_coord in x_error_coords:
-                    parity += 1
-            syndrome.append(parity % 2)
-
-        return np.array(syndrome, dtype=int)
-
-
+   

@@ -1,15 +1,20 @@
+"""
+This is just a visualization module for the unrotated surface code.
+It follows a very similar structure to the other classes. 
+"""
+
 import numpy as np
 import seaborn as sns
-import matplotlib.pyplot as plt
 import matplotlib as mpl
-from matplotlib.patches import Patch, Polygon
+import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from typing import List, Tuple, Dict, Any, Union, Literal, Optional
+from matplotlib.patches import Patch, Polygon
+from typing import List, Tuple, Dict, Union, Literal, Optional
 
 class UnrotatedSurfaceCode:
-    def __init__(self, distance: int, seed: int = 42):
+
+    def __init__(self, distance: int):
         self.d = distance
-        self.seed = seed
         self.qubit_coords, self.x_stabilisers_coords, self.z_stabilisers_coords = self.create(distance)
         self.stabilisers_coords = self.x_stabilisers_coords + self.z_stabilisers_coords
         
@@ -20,7 +25,6 @@ class UnrotatedSurfaceCode:
             [self.inverse_mapping[c] for c in self.stabilisers_coords],
             key=lambda idx: (self.index_mapping[idx][0][1], self.index_mapping[idx][0][0])
         )
-        np.random.seed(self.seed)
 
     def get_data_qubits(self, _as: Literal["coord", "idx"] = "coord") -> Union[List[Tuple[int, int]], List[int]]:
         if _as == "coord":
@@ -79,7 +83,7 @@ class UnrotatedSurfaceCode:
     def get_inverse_mapping(self) -> Dict[Tuple[int, int], int]:
         return {v[0]: k for k, v in self.index_mapping.items()}
 
-    def get_surrounding_dataqubits(self, stab_coord: Tuple[int, int]) -> List[Tuple[int, int]]:
+    def get_surrounding_data_qubits(self, stab_coord: Tuple[int, int]) -> List[Tuple[int, int]]:
         x, y = stab_coord
         potential = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
         neighbors = []
@@ -90,7 +94,7 @@ class UnrotatedSurfaceCode:
                     neighbors.append((nx, ny))
         return neighbors
 
-    def get_surrounding_ancillaqubits(self, data_coord: Tuple[int, int]) -> List[Tuple[int, int]]:
+    def get_surrounding_ancilla_qubits(self, data_coord: Tuple[int, int]) -> List[Tuple[int, int]]:
         x, y = data_coord
         potential = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
         neighbors = []
@@ -122,7 +126,7 @@ class UnrotatedSurfaceCode:
         
         for idx in x_stabs:
             coord = self.index_mapping[idx][0]
-            neighbors = self.get_surrounding_dataqubits(coord)
+            neighbors = self.get_surrounding_data_qubits(coord)
             parity = 0
             for n in neighbors:
                 if n in z_err_coords:
@@ -131,7 +135,7 @@ class UnrotatedSurfaceCode:
             
         for idx in z_stabs:
             coord = self.index_mapping[idx][0]
-            neighbors = self.get_surrounding_dataqubits(coord)
+            neighbors = self.get_surrounding_data_qubits(coord)
             parity = 0
             for n in neighbors:
                 if n in x_err_coords:
@@ -194,7 +198,7 @@ class UnrotatedSurfaceCode:
         z_error_coords = to_coords(z_err)
 
         def plot_stabilizer_patch(coord, qtype, val):
-            neighbors = self.get_surrounding_dataqubits(coord)
+            neighbors = self.get_surrounding_data_qubits(coord)
             color = colors[qtype][val]
             
             if len(neighbors) > 1:
