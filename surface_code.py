@@ -1,6 +1,12 @@
 """
-I want to create a class that represents a surface code for qec.
-I want to use the Surface Code class to initialize a surface code of a given distance.
+surface_code.py
+Implementation of the rotated Surface Code for Quantum Error Correction.
+Defines the SurfaceCode class with methods for creating the code
+structure, indexing, stabilizer measurements, error injection, circuit
+construction in stim. Includes visualization and simulation.
+
+The simulation with noise can be run using pymatching for decoding.
+The results are not the expected yet, further debugging & testing is needed
 """
 
 import numpy as np
@@ -34,14 +40,14 @@ class SurfaceCode:
         self.stabilisers_coords = self.x_stabilisers_coords + self.z_stabilisers_coords
         self.index_mapping = self.get_index_mapping()
         self.inverse_mapping = self.get_inverse_mapping()
-        self.seed = seed
+        self.seed = seed # if randomized -> repoducibility
         self.circuit = stim.Circuit()
         
         stab_indices: List[int] = self.get_stabilisers(_as="idx") # type: ignore
-        self.stab_indices = sorted(  # otherwise Z and X stabilizers are measured in random order!
+        self.stab_indices = sorted(  # otherwise Z and X stabilizers are measured in random order! this way we have control
             stab_indices,
             key=lambda anc: (
-                self.index_mapping[anc][1],        # 'X_stab' or 'Z_stab'
+                self.index_mapping[anc][1],        # 'X_stab' or 'Z_stab' ==> X before Z
                 self.index_mapping[anc][0][0],     # x-coordinate
                 self.index_mapping[anc][0][1],     # y-coordinate
             )
@@ -49,7 +55,7 @@ class SurfaceCode:
         np.random.seed(self.seed)
 
     def get_data_qubits(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[int, int]]|List[int]:
-        """Returns the data qubits coordinates or indices based on the _as parameter."""
+        """returns the data qubits coordinates|indices based on the _as parameter."""
         if _as == "coord":
             return deepcopy(self.qubit_coords)
         elif _as == "idx":
@@ -62,7 +68,7 @@ class SurfaceCode:
             raise ValueError("Invalid value for _as. Use 'coord' or 'idx'.")
     
     def get_stabilisers(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[float, float]]|List[int]:
-        """Returns the stabilisers coordinates or indices based on the _as parameter."""
+        """returns the stabilisers coordinates|indices based on the _as parameter."""
         if _as == "coord":
             return deepcopy(self.stabilisers_coords)
         elif _as == "idx":
@@ -75,6 +81,7 @@ class SurfaceCode:
             raise ValueError("Invalid value for _as. Use 'coord' or 'idx'.")
         
     def get_all_qubits(self, _as: Literal["coord", "idx"] = "coord") -> List[Tuple[Union[int, float], Union[int, float]]]|List[int]:
+        """returns the qubits coordinates|indices based on the _as parameter."""
         if _as == "coord":
             return list(self.qubit_coords + self.stabilisers_coords)
         elif _as == "idx":
@@ -83,53 +90,58 @@ class SurfaceCode:
             raise ValueError("Invalid value for _as. Use 'coord' or 'idx'.")
         
     def get_seed(self) -> int:
+        """Not used now, but potentially in the future"""
+        # for randomization and reporducibility
         return self.seed
     
     @staticmethod
     def create(L: int) -> Tuple[List[Tuple[int, int]], List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """Create the coordinates for data qubits & stabilizers"""
         data_bits: List[Tuple[int, int]] = []
         for r in range(L):
             for c in range(L):
                 data_bits.append((c, r))
 
         x_ancilla: List[Tuple[float, float]] = []
+
         # Set up inner X stabilisers
         for row in range(L - 1):
             for col in range((L - 1) // 2):
                 j = 2 * col + (0 if row % 2 == 0 else 1)
                 x_ancilla.append((j + 0.5, row + 0.5))
 
-        # Set up top X stabilisers
+        # Top X stabilisers
         for col in range((L - 1) // 2):
             j = 2 * col + 1
             x_ancilla.append((j + 0.5, -0.5))
 
-        # Set up bottom X stabilisers
+        # Bottom X stabilisers
         for col in range((L - 1) // 2):
             j = 2 * col
             x_ancilla.append((j + 0.5, L - 1 + 0.5))
 
         z_ancilla: List[Tuple[float, float]] = []
-        # Set up inner Z stabilisers
+        
+        # Inner Z stabilisers
         for row in range(L - 1):
             for col in range((L - 1) // 2):
                 j = 2 * col + (0 if row % 2 == 1 else 1)
                 z_ancilla.append((j + 0.5, row + 0.5))
 
-        # Set up left Z stabilisers
+        # Left Z stabilisers
         for row in range((L - 1) // 2):
             z_ancilla.append((-0.5, 2 * row + 0.5))
 
-        # Set up right Z stabilisers
+        # Right Z stabilisers
         for row in range((L - 1) // 2):
-            i = (2 * row + 1) * L
             z_ancilla.append((L - 1 + 0.5, 2 * row + 1 + 0.5))
 
         return data_bits, x_ancilla, z_ancilla
 
     def get_index_mapping(self) -> Dict[int, Tuple[Tuple[Union[int, float], Union[int, float]], str]]:
         """
-         {0: ((coord_x, coord_y), "data"), 1: ((coord_x, coord_y), "X_stab"), ...}
+        Will be of the form:
+          {0: ((coord_x, coord_y), "data"), 1: ((coord_x, coord_y), "X_stab"), ...}
         """
         all_qubits = []
         for coord in self.qubit_coords:
@@ -161,31 +173,21 @@ class SurfaceCode:
         return inverse_mapping
 
     def get_surrounding_data_qubits(self, stab_coord: Tuple[float, float]) -> List[Tuple[int, int]]:
-        """ From the index map we can get the X stabilizers and the Z stabilizers """
-        """ Given a stabilizer coordinate we can just look for qubits at position """
-        """ (x +/- 0.5, y +/- 0.5) to find the data qubits it acts on given these """
-        """ are in the index mapping contained (edge stabilizers got 2 neighbors) """
+        """ From the index map we can get the X stabilizers and the Z stabilizers 
+            Given a stabilizer coordinate we can just look for qubits at position
+            (x +/- 0.5, y +/- 0.5) to find the data qubits it acts on given these
+            are in the index mapping contained (edge stabilizers got 2 neighbors) """
         
-        """
-    # ====================================================================================================== #
-        From stim/src/... and paper: https://arxiv.org/pdf/2409.14765
-            // Define interaction orders so that hook errors run against the error grain instead of with it.
-            std::vector<surface_coord> z_order{
-                {1, 1},
-                {1, -1},
-                {-1, 1},
-                {-1, -1},
-            };
-            std::vector<surface_coord> x_order{
-                {1, 1},
-                {-1, 1},
-                {1, -1},
-                {-1, -1},
-            };
-        """
+
         
         surrounding_qubits: List[Tuple[int, int]] = []
         x, y = stab_coord
+
+        """ ====================================================================================================== 
+            From paper: https://arxiv.org/pdf/2409.14765 
+            (Anthony Ryan O'Rourke et al., Compare the Pair: Rotated vs. Unrotated Surface Codes at Equal Logical Error Rates)
+            // Here they define interaction orders so that hook errors run against the error grain instead of with it.
+        """
         deltaZ = [(0.5, -0.5), (0.5, 0.5), (-0.5, -0.5), (-0.5, 0.5)]
         deltaX = [(0.5, -0.5), (-0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)]
         deltas = deltaZ if stab_coord in self.z_stabilisers_coords else deltaX
@@ -198,6 +200,7 @@ class SurfaceCode:
         return surrounding_qubits
 
     def plot(self):
+        # Quick plot to verify correctness of the surface code structrue
         sns.set_style("dark")
         mpl.rcParams.update(  
             {
@@ -243,10 +246,9 @@ class SurfaceCode:
         plt.grid(True)
         plt.show()
 
-    def loop_body(self, meas_errors = 0.0) -> stim.Circuit:
-            """ Stabilizer Measurement Loop Body """
+    def loop_body(self, depolarize_prob:float = 0.0) -> stim.Circuit:
+            """ Stabilizer Measurement Loop Body - idealized, noiseles """
             loop_body = stim.Circuit()
-            # Ancillas in Z basis
             loop_body.append("R", self.stab_indices)  # type: ignore
 
             for ancilla_idx in self.stab_indices:
@@ -270,18 +272,15 @@ class SurfaceCode:
 
                 if qtype == 'X_stab':
                     loop_body.append("H", [ancilla_idx])  # type: ignore
-                
-            # Add measurement errors in form of depolarizing error on ancillas
-            # if meas_errors > 0.0:
-            #     loop_body.append("X_ERROR", self.stab_indices, meas_errors)  # type: ignore
-
+            
+            # loop_body.append("X_ERROR", self.stab_indices, depolarize_prob)  # type: ignore
             loop_body.append("M", self.stab_indices)  # type: ignore
             loop_body.append("TICK")  # type: ignore
             return loop_body
 
     def loop_body_noisy(self, noise_params: Dict[str, float] = {}) -> stim.Circuit:
             """
-            Stabilizer Measurement Loop Body with granular error injection.
+            Stabilizer Measurement Loop Body, with error injection.
             noise_params keys: 'p_init', 'p_meas', 'p_gate1', 'p_gate2', 'p_idle'
             """
             p_init = noise_params.get("p_init", 0.0)
@@ -314,7 +313,6 @@ class SurfaceCode:
                     loop.append("CNOT", targets)  # type: ignore
                     if p_gate2 > 0:
                         loop.append("DEPOLARIZE2", targets, p_gate2) # type: ignore
-                    # loop.append("TICK") # type: ignore
 
                 if qtype == 'X_stab':
                     loop.append("H", [ancilla_idx])  # type: ignore
@@ -335,7 +333,8 @@ class SurfaceCode:
             loop.append("TICK") # type: ignore
             return loop
 
-    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob: float = 0.0) -> None:
+    def build_in_stim(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", depolarize_prob:float=0.0) -> None:
+        """ First implementation version; Idealized, noiseless rotated surface code circuit in stim"""
 
         for idx, (coord, _) in self.index_mapping.items():
             self.circuit.append("QUBIT_COORDS", [idx], [coord[0], coord[1]])
@@ -343,10 +342,7 @@ class SurfaceCode:
         data_indices = [k for k, v in self.index_mapping.items() if v[1] == 'data']
 
         dt = len(self.stab_indices)
-        if dt == 0:
-            raise RuntimeError("No stabilizers found in the surface code.")
 
-        # |0>L or |+>L
         if logical_basis == "Z":
             self.circuit.append("R", data_indices) # type: ignore
         elif logical_basis == "X":
@@ -357,41 +353,37 @@ class SurfaceCode:
 
         self.circuit.append("TICK") # type: ignore 
         
-        loop_body = self.loop_body()
-        # One-shot stabilizer projection
+        loop_body = self.loop_body(depolarize_prob=depolarize_prob)
         self.circuit += loop_body
         
         self.circuit.append("X", [8]) # type: ignore
 
         t = dt # "time index"
 
-        
         for rnd in range(1, rounds):
             # Shift coordinates 
             self.circuit.append("SHIFT_COORDS", [], [0, 0, 1])  # type: ignore
 
-            # if depolarize_prob > 0.0:
-            #     self.circuit.append("DEPOLARIZE1", data_indices, depolarize_prob)  # type: ignore
+            if depolarize_prob > 0.0:
+                self.circuit.append("DEPOLARIZE1", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("X_ERROR", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("Y_ERROR", data_indices, depolarize_prob)  # type: ignore
                 # self.circuit.append("Z_ERROR", data_indices, depolarize_prob)  # type: ignore
                 
-            self.circuit += self.loop_body(meas_errors=depolarize_prob/10)
+            self.circuit += self.loop_body()
 
             prev = t - dt
             curr = t
             for j, anc in enumerate(self.stab_indices):
                 coord, _ = self.index_mapping[anc]
-                # target the time j produced by the last M operation.
-
-                lookback_prev = (prev+j) - (t+dt)# - (dt-j) # (prev+j) - (t+dt) # look back to prev
-                lookback_curr = (curr+j) - (t+dt) # - (2*dt-j) # (curr+j) - (t+dt) # look back to curr
+                lookback_prev = (prev+j) - (t+dt)
+                lookback_curr = (curr+j) - (t+dt)
 
                 self.circuit.append(
                     "DETECTOR",
                     [
-                        stim.target_rec(lookback_prev), # (prev + j) | stim.target_record_bit, 
-                        stim.target_rec(lookback_curr), # (curr + j) | stim.target_record_bit
+                        stim.target_rec(lookback_prev),
+                        stim.target_rec(lookback_curr),
                     ],
                     [coord[0], coord[1], rnd]
                 )
@@ -401,15 +393,15 @@ class SurfaceCode:
         if logical_basis == "Z":
             self.circuit.append("M", data_indices) # type: ignore
         else:
-            # measure X by rotating to Z then measuring
             self.circuit.append("H", data_indices) # type: ignore
             self.circuit.append("M", data_indices) # type: ignore
             
         logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
-        self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
+        self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0) # so one can infer the logical measurement outcome
 
     def build_in_stim_simple_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z",
                                     p:float = 0.0) -> None:
+        """simple noise model with fixed error probabilities given p"""
         
         noise_params = {
             "p_init": 2*p,
@@ -471,7 +463,7 @@ class SurfaceCode:
         logical_targets = [stim.target_rec(-k) for k in range(1, len(data_indices)+1)]
         self.circuit.append("OBSERVABLE_INCLUDE", logical_targets, 0)
 
-    def build_in_stim_noisy2(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
+    def build_in_stim_noisy(self, rounds: int = 1, logical_basis: Literal["X", "Z"] = "Z", 
                                 noise_params: Optional[Dict[str, float]] = None) -> None:
             
             if noise_params is None: noise_params = {}

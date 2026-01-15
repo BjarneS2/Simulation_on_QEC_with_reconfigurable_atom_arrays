@@ -1,15 +1,21 @@
-from operator import index
-from surface_code import SurfaceCode
-import stim
-import numpy as np
-import matplotlib.pyplot as plt
+"""
+MultiLogicalSurfaceCode.py
+A module for simulating and visualizing multiple logical qubits
+using the rotated surface code. The code in this current version
+does not support full functionality and no decoding nor useful
+simuations will run. This is a current work in progress.
+
+"""
+from typing import List, Dict, Any, Tuple, Union, Optional
 from matplotlib.patches import Polygon, Patch, Wedge
-import matplotlib as mpl
-import matplotlib.pyplot as plt
+from surface_code import SurfaceCode
 from matplotlib.lines import Line2D
-import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib as mpl
 import pymatching as pm
-from typing import List, Dict, Any, Tuple, Union, Optional, Literal
+import seaborn as sns
+import numpy as np
+import stim
 
 class MultiLogicalSurfaceCode:
     def __init__(self, distance: int, num_logical_qubits: int, seed: int = 42):
@@ -23,7 +29,6 @@ class MultiLogicalSurfaceCode:
         self.after_transversal_cnot = False
         self.stab_measurement_history: Dict[int, List[Any]] = {}
         
-        # Initialize lattices
         self._initialize_lattice()
         
     def _initialize_lattice(self):
@@ -46,7 +51,7 @@ class MultiLogicalSurfaceCode:
             shifted_x_stab = [(x + shift_x, y) for x, y in x_stab_coords]
             shifted_z_stab = [(x + shift_x, y) for x, y in z_stab_coords]
             
-            # Collect all qubits for this patch to sort them
+            # Collect qubits for a patch & sort
             patch_qubits = []
             for coord in shifted_data:
                 patch_qubits.append({'coord': coord, 'type': 'data', 'sort_key': (coord[1], coord[0])})
@@ -55,10 +60,9 @@ class MultiLogicalSurfaceCode:
             for coord in shifted_z_stab:
                 patch_qubits.append({'coord': coord, 'type': 'Z_stab', 'sort_key': (coord[1], coord[0])})
             
-            # Sort primarily by y, then x (same as SurfaceCode)
+            # Sort primarily by y, then x (as in SurfaceCode)
             patch_qubits.sort(key=lambda q: q['sort_key'])
             
-            # Assign indices
             patch_indices = []
             patch_data_indices = []
             patch_stab_indices = []
@@ -121,9 +125,10 @@ class MultiLogicalSurfaceCode:
         for dx, dy in deltas:
             neighbor_coord = (x + dx, y + dy)
             if neighbor_coord in self.inverse_mapping:
-                # Check if it is a data qubit
+                # Check if it is a data qubit also acts 
+                # like a safety type check for the stab coord
                 n_idx = self.inverse_mapping[neighbor_coord]
-                if self.index_mapping[n_idx][1] == 'data':
+                if self.index_mapping[n_idx][1] == 'data': 
                     surrounding_qubits.append(neighbor_coord) # type: ignore
 
         return surrounding_qubits
@@ -157,7 +162,6 @@ class MultiLogicalSurfaceCode:
 
         circ.append("M", all_stabs)  # type: ignore
 
-        # ---- DETECTORS (time-like) ----
         for k, anc in enumerate(all_stabs):
             rec = stim.target_rec(-(len(all_stabs) - k))
 
@@ -167,10 +171,9 @@ class MultiLogicalSurfaceCode:
                 if not round0:
                     circ.append("DETECTOR", [rec, prev])  # type: ignore
 
-            # Add the new measurement to the history
             self.stab_measurement_history.setdefault(anc, []).append(rec)
 
-        circ.append("TICK")
+        circ.append("TICK") # type: ignore
         return circ
 
     def measure_joint_stabilizers_after_cnot(self, control: int, target: int) -> stim.Circuit:
@@ -181,7 +184,7 @@ class MultiLogicalSurfaceCode:
 
         shift = self.distance + 1
 
-        # ---- X ⊗ X joint stabilizers (from control X stabilizers) ----
+        # X@X joint stabilizers
         for anc in ctrl["stab_indices"]:
             coord, qtype = self.index_mapping[anc]
             if qtype != "X_stab":
@@ -201,23 +204,18 @@ class MultiLogicalSurfaceCode:
             circ.append("M", [anc])  # type: ignore
 
             rec_joint = stim.target_rec(-1)
-
-            # Previous individual stabilizers
             prev_ctrl = self.stab_measurement_history[anc][-1]
 
-            # Find corresponding X stabilizer in target block
+            # target X
             tgt_coord = (coord[0] + shift, coord[1])
             tgt_anc = self.inverse_mapping[tgt_coord]
             prev_tgt = self.stab_measurement_history[tgt_anc][-1]
 
-            # Detector: XX ⊕ X_A ⊕ X_B
-            print("DETECTOR", [rec_joint, prev_ctrl, prev_tgt])
+            # print("DETECTOR", [rec_joint, prev_ctrl, prev_tgt])
             circ.append("DETECTOR", [rec_joint, prev_ctrl, prev_tgt])  # type: ignore
-
-            # Update history
             self.stab_measurement_history[anc].append(rec_joint)
 
-        # ---- Z ⊗ Z joint stabilizers (from target Z stabilizers) ----
+        # now for ZZ
         for anc in tgt["stab_indices"]:
             coord, qtype = self.index_mapping[anc]
             if qtype != "Z_stab":
@@ -226,13 +224,13 @@ class MultiLogicalSurfaceCode:
             neigh_t = self.get_surrounding_data_qubits(coord)
             neigh_c = [(x - shift, y) for x, y in neigh_t]
 
-            circ.append("R", [anc])
+            circ.append("R", [anc]) # type: ignore
 
             for c, t in zip(neigh_c, neigh_t):
-                circ.append("CNOT", [self.inverse_mapping[c], anc])
-                circ.append("CNOT", [self.inverse_mapping[t], anc])
+                circ.append("CNOT", [self.inverse_mapping[c], anc]) # type: ignore
+                circ.append("CNOT", [self.inverse_mapping[t], anc]) # type: ignore
 
-            circ.append("M", [anc])
+            circ.append("M", [anc]) # type: ignore
 
             rec_joint = stim.target_rec(-1)
 
@@ -242,70 +240,13 @@ class MultiLogicalSurfaceCode:
             ctrl_anc = self.inverse_mapping[ctrl_coord]
             prev_ctrl = self.stab_measurement_history[ctrl_anc][-1]
 
-            # Detector: ZZ ⊕ Z_A ⊕ Z_B
-            circ.append("DETECTOR", [rec_joint, prev_ctrl, prev_tgt])
+            # Detector: ZZ+Zc+Zt
+            circ.append("DETECTOR", [rec_joint, prev_ctrl, prev_tgt])  # type: ignore
 
             self.stab_measurement_history[anc].append(rec_joint)
 
-        circ.append("TICK")
+        circ.append("TICK")  # type: ignore
         return circ
-
-    # def measure_joint_stabilizers_after_cnot(self, control: int, target: int) -> stim.Circuit:
-    #     circ = stim.Circuit()
-
-    #     ctrl = self.logical_qubits[str(control)]
-    #     tgt = self.logical_qubits[str(target)]
-
-    #     shift = self.distance + 1
-    #     measured_ancillas = []
-
-    #     # X stabilizers of control → X ⊗ X
-    #     for anc in ctrl["stab_indices"]:
-    #         coord, qtype = self.index_mapping[anc]
-    #         if qtype != "X_stab":
-    #             continue
-
-    #         neigh_c = self.get_surrounding_data_qubits(coord)
-    #         neigh_t = [(x + shift, y) for x, y in neigh_c]
-
-    #         circ.append("R", [anc])
-    #         circ.append("H", [anc])
-
-    #         for c, t in zip(neigh_c, neigh_t):
-    #             circ.append("CNOT", [anc, self.inverse_mapping[c]])
-    #             circ.append("CNOT", [anc, self.inverse_mapping[t]])
-
-    #         circ.append("H", [anc])
-    #         circ.append("M", [anc])
-    #         measured_ancillas.append(anc)
-
-    #     # Z stabilizers of target → Z ⊗ Z
-    #     for anc in tgt["stab_indices"]:
-    #         coord, qtype = self.index_mapping[anc]
-    #         if qtype != "Z_stab":
-    #             continue
-
-    #         neigh_t = self.get_surrounding_data_qubits(coord)
-    #         neigh_c = [(x - shift, y) for x, y in neigh_t]
-
-    #         circ.append("R", [anc])
-
-    #         for c, t in zip(neigh_c, neigh_t):
-    #             circ.append("CNOT", [self.inverse_mapping[c], anc])
-    #             circ.append("CNOT", [self.inverse_mapping[t], anc])
-
-    #         circ.append("M", [anc])
-    #         measured_ancillas.append(anc)
-
-    #     # ---- DETECTORS for joint stabilizers ----
-    #     for k, anc in enumerate(measured_ancillas):
-    #         rec = stim.target_rec(-(len(measured_ancillas) - k))
-    #         # This detector compares the measurement result to its expected value (0).
-    #         # It doesn't use the history, so it doesn't interfere with local stabilizers.
-    #         circ.append("DETECTOR", [rec])
-
-    #     circ.append("TICK")
-    #     return circ
 
     def apply_logical_gate(self, gate: str, control: int, target: int):
         if gate != "CNOT":
@@ -317,8 +258,9 @@ class MultiLogicalSurfaceCode:
         ctrl = self.logical_qubits[str(control)]["data_indices"]
         tgt = self.logical_qubits[str(target)]["data_indices"]
 
-        mid_idx = len(ctrl) // 2
-        self.quantum_algorithm.append("X", [ctrl[mid_idx]]) # type: ignore
+        # To check if X error gets propagated to target
+        # mid_idx = len(ctrl) // 2
+        # self.quantum_algorithm.append("X", [ctrl[mid_idx]]) # type: ignore
 
         for c, t in zip(ctrl, tgt):
             self.quantum_algorithm.append("CNOT", [c, t]) # type: ignore
@@ -327,14 +269,19 @@ class MultiLogicalSurfaceCode:
         self.logical_cnot_history.append((control, target))
 
     def build(self, rounds: int = 3):
+        """
+        Essentially the same as in SurfaceCode.py but now a bit 
+        shorter and modularized since we have more helper 
+        functipns. 
+        """
+
         for q, (coord, _) in self.index_mapping.items():
-            self.circuit.append("QUBIT_COORDS", [q], coord)
+            self.circuit.append("QUBIT_COORDS", [q], coord) 
 
         for q, (coord, qtype) in self.index_mapping.items():
             if 'data' == qtype:
                 self.circuit.append("R", q) # type: ignore
 
-        # initial round
         self.circuit += self.measure_local_stabilizers(round0=True)
         
         if self.quantum_algorithm is not None:
@@ -348,10 +295,14 @@ class MultiLogicalSurfaceCode:
             self.circuit += self.measure_local_stabilizers()
 
     def run_with_pymatching(self, shots=1000, joint_decoding=True):
+        """
+        Using stims detector error model and pymatching for decoding. 
+        """
+
         model = self.circuit.detector_error_model(decompose_errors=True)
 
         if not joint_decoding:
-            model = model.filter_detectors(
+            model = model.filter_detectors( # type: ignore
                 lambda d: d.coords is None or len(d.coords) < 3
             )
 
@@ -364,6 +315,12 @@ class MultiLogicalSurfaceCode:
         return np.mean(np.any(preds != obs, axis=1))
 
     def visualize_results(self, result: np.ndarray, show_ancillas: bool = False, show_indices: bool = False):
+        """
+        Visualize a syndrome result array.
+        
+        0 -> no error (stabilizer == +1)
+        1 -> error (stabilizer == -1)"""
+
         sns.set_style("darkgrid")
         mpl.rcParams.update({
             "font.size": 12,
@@ -394,7 +351,6 @@ class MultiLogicalSurfaceCode:
                 poly = Polygon(neighbors, closed=True, facecolor=colors[qtype][val], edgecolor='black', alpha=0.7)
                 ax.add_patch(poly)
             elif len(neighbors) == 2:
-                # Boundary Stabilizer -> Wedge
                 mx = (neighbors[0][0] + neighbors[1][0]) / 2
                 my = (neighbors[0][1] + neighbors[1][1]) / 2
                 vec_x = mx - center_x
@@ -403,12 +359,10 @@ class MultiLogicalSurfaceCode:
                 pointing_angle = (angle + 180) % 360
                 theta1 = pointing_angle - 90
                 theta2 = pointing_angle + 90
-                
                 wedge = Wedge((mx, my), r=0.5, theta1=theta1, theta2=theta2,
                               facecolor=colors[qtype][val], edgecolor='black', alpha=0.7)
                 ax.add_patch(wedge)
 
-        # 1. Plot Active Stabilizers (Results)
         for i, idx in enumerate(all_stab_indices):
             if i >= len(result): 
                 break
@@ -417,37 +371,29 @@ class MultiLogicalSurfaceCode:
             neighbors = self.get_surrounding_data_qubits(coord)
             plot_stabilizer_patch(coord, neighbors, qtype, val)
             
-            # Add Index Text for Active Stabilizers
             if show_indices:
-                # Use White text for better contrast on dark red/blue patches
                 ax.text(coord[0], coord[1], str(idx), color='white', 
                         ha='center', va='center', fontsize=9, fontweight='bold', zorder=20)
             
-        # 2. Plot Data Qubits
         data_coords = [c for c in self.all_qubits_coords if self.index_mapping[self.inverse_mapping[c]][1] == 'data']
         data_x = [c[0] for c in data_coords]
         data_y = [c[1] for c in data_coords]
         
         ax.scatter(data_x, data_y, s=100, color='#F0F0F0', edgecolor='black', zorder=10, label='Data Qubit')
         
-        # Add Index Text for Data Qubits
         if show_indices:
             for c in data_coords:
                 idx = self.inverse_mapping[c]
                 ax.text(c[0], c[1], str(idx), color='black', 
                         ha='center', va='center', fontsize=8, zorder=21)
         
-        # 3. Plot Inactive Ancillas (Background)
         if show_ancillas:
             anc_coords = [c for c in self.all_qubits_coords if 'stab' in self.index_mapping[self.inverse_mapping[c]][1]]
             anc_x = [c[0] for c in anc_coords]
             anc_y = [c[1] for c in anc_coords]
             ax.scatter(anc_x, anc_y, s=50, color='gray', marker='s', zorder=11)
 
-            # Add Index Text for Inactive Ancillas (if not already plotted by result loop)
-            # (Optional: This handles ancillas that might exist but weren't in the result list)
             if show_indices:
-                # Get set of indices already plotted to avoid overlap
                 active_indices = set(all_stab_indices[:len(result)])
                 for c in anc_coords:
                     idx = self.inverse_mapping[c]
@@ -455,10 +401,9 @@ class MultiLogicalSurfaceCode:
                          ax.text(c[0], c[1], str(idx), color='white', 
                                  ha='center', va='center', fontsize=8, zorder=21)
 
-        # 4. Draw Logical Boundaries
         for i in range(self.num_logical_qubits):
             shift_x = i * (self.distance + 1)
-            rect_patch = plt.Rectangle(
+            rect_patch = plt.Rectangle( # type: ignore
                 (shift_x - 0.8, -0.8), 
                 self.distance + 0.6, 
                 self.distance + 0.6,
@@ -471,95 +416,20 @@ class MultiLogicalSurfaceCode:
             ax.text(shift_x + self.distance/2 - 0.5, -1.2, f"L{i}", color='purple', fontsize=14, fontweight='bold')
 
         ax.set_aspect('equal')
-        ax.set_title(f"Multi-Logical Qubit Surface Code (d={self.distance}, N={self.num_logical_qubits})")
+        # ax.invert_yaxis()
+        # ax.set_title(f"Multi-Logical Qubit Surface Code (d={self.distance}, N={self.num_logical_qubits})")
+        plt.tight_layout()
         plt.show()
 
     def run_simulation(self, shots: int = 1000) -> np.ndarray:
+        """simply run the circuit and return the results"""
         sampler = self.circuit.compile_detector_sampler()
         results:np.ndarray = sampler.sample(shots=shots) # type: ignore
         print(results)
         return results
 
-    def diagram(self):
-        print(self.circuit.diagram())
-
-    def measure_local_stabilizers_old(self) -> stim.Circuit:
-            circ = stim.Circuit()
-            all_stabs = []
-
-            for i in range(self.num_logical_qubits):
-                all_stabs.extend(self.logical_qubits[str(i)]["stab_indices"])
-
-            circ.append("R", all_stabs) # type: ignore
-
-            for i in range(self.num_logical_qubits):
-                for anc in self.logical_qubits[str(i)]["stab_indices"]:
-                    coord, qtype = self.index_mapping[anc]
-                    neighbors = self.get_surrounding_data_qubits(coord)
-
-                    if qtype == "X_stab":
-                        circ.append("H", [anc]) # type: ignore
-
-                    for n in neighbors:
-                        nidx = self.inverse_mapping[n]
-                        if qtype == "X_stab":
-                            circ.append("CNOT", [anc, nidx]) # type: ignore
-                        else:
-                            circ.append("CNOT", [nidx, anc]) # type: ignore
-
-                    if qtype == "X_stab":
-                        circ.append("H", [anc]) # type: ignore
-
-            circ.append("M", all_stabs) # type: ignore
-            circ.append("TICK") # type: ignore
-            return circ
-     
-    def measure_joint_stabilizers_after_cnot_old(self, control: int, target: int) -> stim.Circuit:
-        circ = stim.Circuit()
-
-        ctrl = self.logical_qubits[str(control)]
-        tgt = self.logical_qubits[str(target)]
-
-        shift = self.distance + 1
-
-        # X stabilizers of control → X ⊗ X
-        for anc in ctrl["stab_indices"]:
-            coord, qtype = self.index_mapping[anc]
-            if qtype != "X_stab":
-                continue
-
-            neigh_c = self.get_surrounding_data_qubits(coord)
-            neigh_t = [(x + shift, y) for x, y in neigh_c]
-
-            circ.append("R", [anc]) # type: ignore
-            circ.append("H", [anc]) # type: ignore
-
-            for c, t in zip(neigh_c, neigh_t):
-                circ.append("CNOT", [anc, self.inverse_mapping[c]]) # type: ignore
-                circ.append("CNOT", [anc, self.inverse_mapping[t]]) # type: ignore
-
-            circ.append("H", [anc]) # type: ignore
-            circ.append("M", [anc]) # type: ignore
-
-        # Z stabilizers of target → Z ⊗ Z
-        for anc in tgt["stab_indices"]:
-            coord, qtype = self.index_mapping[anc]
-            if qtype != "Z_stab":
-                continue
-
-            neigh_t = self.get_surrounding_data_qubits(coord)
-            neigh_c = [(x - shift, y) for x, y in neigh_t]
-
-            circ.append("R", [anc]) # type: ignore
-
-            for c, t in zip(neigh_c, neigh_t):
-                circ.append("CNOT", [self.inverse_mapping[c], anc]) # type: ignore
-                circ.append("CNOT", [self.inverse_mapping[t], anc]) # type: ignore
-
-            circ.append("M", [anc]) # type: ignore
-
-        circ.append("TICK") # type: ignore
-        return circ
+    def diagram(self, *args, **kwargs):
+        print(self.circuit.diagram(*args, **kwargs))
 
     def get_syndrome(self, X_errors: Dict[str, List[Union[int, Tuple[float, float]]]] = {}, Z_errors: Dict[str, List[Union[int, Tuple[float, float]]]] = {}) -> np.ndarray:
         """
@@ -569,7 +439,6 @@ class MultiLogicalSurfaceCode:
         """
         full_syndrome = []
 
-        # Iterate through each logical qubit patch
         for i in range(self.num_logical_qubits):
             key = str(i)
             # Get errors for this patch (default to empty list if not present)
@@ -621,6 +490,21 @@ class MultiLogicalSurfaceCode:
     def visualize(self, show_ancillas: bool = False, show_indices: bool = False,
                   X_errors: Dict[str, List[Union[int, Tuple[float, float]]]] = {}, 
                   Z_errors: Dict[str, List[Union[int, Tuple[float, float]]]] = {}):
+        """
+        Visualizing the code with some syndrome given X and Z errors. 
+
+        Example usage:
+        multi_code = MultiLogicalSurfaceCode(distance=7, num_logical_qubits=2)
+        X_errors = {
+            "0": [46, 47, 48],
+            "1": [144, 145]
+        }
+        Z_errors = {
+            "0": [48],
+            "1": [144]
+        }
+        multi_code.visualize(X_errors=X_errors, Z_errors=Z_errors)
+        """
         
         result = self.get_syndrome(X_errors, Z_errors)
         
@@ -635,32 +519,30 @@ class MultiLogicalSurfaceCode:
         })
         
         colors = {
-            'X_stab': {0: "#79ABD4", 1: "#F07084"},  # Muted Blue vs Muted Red
-            'Z_stab': {0: "#385B8B", 1: "#9D212F"}   # Darker Blue vs Lighter Red
+            'X_stab': {0: "#79ABD4", 1: "#F07084"},
+            'Z_stab': {0: "#385B8B", 1: "#9D212F"}
         }
         
         total_width = self.num_logical_qubits * (self.distance + 1)
-        fig, ax = plt.subplots(figsize=(total_width, self.distance + 2))
+        _, ax = plt.subplots(figsize=(total_width, self.distance + 2))
         
-        # Prepare error coordinates for coloring
         all_x_error_coords = set()
         all_z_error_coords = set()
         
-        for key, errs in X_errors.items():
+        for _, errs in X_errors.items():
             for e in errs:
                 if isinstance(e, int) and e in self.index_mapping:
                     all_x_error_coords.add(self.index_mapping[e][0])
                 elif isinstance(e, tuple):
                     all_x_error_coords.add(e)
                     
-        for key, errs in Z_errors.items():
+        for _, errs in Z_errors.items():
             for e in errs:
                 if isinstance(e, int) and e in self.index_mapping:
                     all_z_error_coords.add(self.index_mapping[e][0])
                 elif isinstance(e, tuple):
                     all_z_error_coords.add(e)
 
-        # Iterate over all logical qubits to plot stabilizers in correct order
         current_res_idx = 0
         
         def plot_stabilizer_patch(coord, neighbors, qtype, val):
@@ -694,7 +576,8 @@ class MultiLogicalSurfaceCode:
             ordered_stabs = x_stabs + z_stabs
             
             for idx in ordered_stabs:
-                if current_res_idx >= len(result): break
+                if current_res_idx >= len(result): 
+                    break
                 val = result[current_res_idx]
                 current_res_idx += 1
                 
@@ -703,17 +586,14 @@ class MultiLogicalSurfaceCode:
                 plot_stabilizer_patch(coord, neighbors, qtype, val)
                 
                 if show_indices:
-                     # Determine text color for visibility
-                    t_color = 'black' #'white' # if qtype in ['X_stab', 'Z_stab'] else 'black'
+                    t_color = 'black'
                     ax.text(coord[0], coord[1], str(idx), color=t_color, 
                             ha='center', va='center', fontsize=9, fontweight='bold', zorder=20)
 
-        # 2. Plot Data Qubits
         data_coords = [c for c in self.all_qubits_coords if self.index_mapping[self.inverse_mapping[c]][1] == 'data']
         data_x = [c[0] for c in data_coords]
         data_y = [c[1] for c in data_coords]
         
-        # Determine colors
         data_colors = []
         for c in data_coords:
             has_x = c in all_x_error_coords
@@ -730,14 +610,12 @@ class MultiLogicalSurfaceCode:
 
         ax.scatter(data_x, data_y, s=200, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
         
-        # Add Index Text for Data Qubits
         if show_indices:
             for c in data_coords:
                 idx = self.inverse_mapping[c]
                 ax.text(c[0], c[1], str(idx), color='black', 
                         ha='center', va='center', fontsize=8, zorder=21)
         
-        # 3. Plot Inactive Ancillas (Background)
         if show_ancillas:
             anc_coords = [c for c in self.all_qubits_coords if 'stab' in self.index_mapping[self.inverse_mapping[c]][1]]
             anc_x = [c[0] for c in anc_coords]
@@ -753,10 +631,10 @@ class MultiLogicalSurfaceCode:
                     # This might overlap if we plot again.
                     pass 
 
-        # 4. Draw Logical Boundaries
+
         for i in range(self.num_logical_qubits):
             shift_x = i * (self.distance + 1)
-            rect_patch = plt.Rectangle(
+            rect_patch = plt.Rectangle( # type: ignore
                 (shift_x - 0.8, -0.8), 
                 self.distance + 0.6, 
                 self.distance + 0.6,
@@ -769,11 +647,9 @@ class MultiLogicalSurfaceCode:
             ax.text(shift_x + self.distance/2 - 0.5, -1.2, f"L{i}", color='purple', fontsize=14, fontweight='bold')
 
         ax.set_aspect('equal')
-        # Remove axis ticks
         ax.set_xticks([])
         ax.set_yticks([])
-        
-        # ax.set_title(f"Multi-Logical Qubit Surface Code (d={self.distance}, N={self.num_logical_qubits})")
+        # ax.invert_yaxis()
         
         legend_elements = [
             Patch(facecolor=colors['X_stab'][0], edgecolor='k', label='X-Stab (Ok)'),
@@ -793,7 +669,6 @@ class MultiLogicalSurfaceCode:
             
         ]
         ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.175, 1))
-
         plt.tight_layout()
         plt.show()
 
