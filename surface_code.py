@@ -639,11 +639,11 @@ class SurfaceCode:
         return np.array(syndrome, dtype=int)
 
     def visualize_results(self, result: Optional[np.ndarray] = None, show_ancillas: bool = False, 
-                          show_index: bool = False, show_edges: bool = True, 
+                          show_index: bool = False, show_edges: bool = True, show_legend: bool = True,
                           x_err: List[Union[int, Tuple[float, float]]] = [], 
                           z_err: List[Union[int, Tuple[float, float]]] = []) -> None:
         """ 
-        Inspired by the visualization in: github/jfoliveira/surfq
+        Inspired by the visualization in: https://github.com/jfoliveiraramos/surfq
         Visualize the measurement results on the surface code.
         Plots data qubits as circles and colors the plaquettes (stabilizers)
         based on the measurement outcome (Syndrome vs Normal).
@@ -832,7 +832,8 @@ class SurfaceCode:
                           markerfacecolor='cyan', markersize=10, markeredgecolor='k'),
             
         ]
-        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
+        if show_legend:
+            ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.5, 1))
         # ax.set_title(f"Syndrome Measurement (d={self.d})")
         plt.tight_layout()
         plt.show()

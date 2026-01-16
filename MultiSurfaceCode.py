@@ -492,6 +492,7 @@ class MultiLogicalSurfaceCode:
                   Z_errors: Dict[str, List[Union[int, Tuple[float, float]]]] = {}):
         """
         Visualizing the code with some syndrome given X and Z errors. 
+        Adapted from surface_code.py visualize function.
 
         Example usage:
         multi_code = MultiLogicalSurfaceCode(distance=7, num_logical_qubits=2)

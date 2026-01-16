@@ -150,6 +150,7 @@ class UnrotatedSurfaceCode:
                   x_err: List[Union[int, Tuple[int, int]]] = [], 
                   z_err: List[Union[int, Tuple[int, int]]] = [],
                   show_legend: bool = True) -> None:
+        """Adapted version from the rotated surface code, from surface_code.py"""
         
         sns.set_style("darkgrid")
         mpl.rcParams.update(  
@@ -243,16 +244,16 @@ class UnrotatedSurfaceCode:
             else:
                 data_colors.append('#F0F0F0')
                 
-        ax.scatter(data_x, data_y, s=100, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
+        ax.scatter(data_x, data_y, s=200, c=data_colors, edgecolor='black', zorder=10, label='Data Qubit')
         
         if show_ancillas:
              x_anc_x = [c[0] for c in self.x_stabilisers_coords]
              x_anc_y = [c[1] for c in self.x_stabilisers_coords]
-             ax.scatter(x_anc_x, x_anc_y, s=75, c='silver', marker='o', edgecolor="black", zorder=11, label='X Ancilla')
+             ax.scatter(x_anc_x, x_anc_y, s=150, c='silver', marker='o', edgecolor="black", zorder=11, label='X Ancilla')
              
              z_anc_x = [c[0] for c in self.z_stabilisers_coords]
              z_anc_y = [c[1] for c in self.z_stabilisers_coords]
-             ax.scatter(z_anc_x, z_anc_y, s=75, c='silver', marker='o', edgecolor="black", zorder=11, label='Z Ancilla')
+             ax.scatter(z_anc_x, z_anc_y, s=150, c='silver', marker='o', edgecolor="black", zorder=11, label='Z Ancilla')
         
         if show_index:
             for coord in self.qubit_coords:
@@ -271,7 +272,7 @@ class UnrotatedSurfaceCode:
         ax.set_xticklabels([])
         ax.set_yticklabels([])
         
-        ax.set_title(f"Unrotated Surface Code (d={self.d})")
+        # ax.set_title(f"Unrotated Surface Code (d={self.d})")
         
         if show_legend:
             legend_elements = [
